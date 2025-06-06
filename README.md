@@ -1,0 +1,171 @@
+# LLMProxy
+
+A high-performance proxy server for Large Language Models (LLMs) that provides intelligent load balancing, automatic failover, rate limiting, and response caching.
+
+## Features
+
+- **Load Balancing**: Distribute requests across multiple LLM endpoints using weighted round-robin
+- **Automatic Failover**: Seamlessly switch to backup endpoints when primary endpoints fail
+- **Rate Limit Management**: Track and respect API rate limits to prevent 429 errors
+- **Response Caching**: Cache deterministic responses in Redis for improved performance
+- **OpenAI Compatible**: Drop-in replacement for OpenAI API clients
+- **Multi-Provider Support**: Works with OpenAI and Azure OpenAI endpoints
+- **Health Monitoring**: Track endpoint health and automatically cooldown failed endpoints
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.8+
+- Redis server
+- API keys for OpenAI and/or Azure OpenAI
+
+### Installation
+
+1. Clone the repository:
+```bash
+git clone <repository-url>
+cd llmproxy
+```
+
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+3. Set up environment variables:
+
+**Option A: For testing (no real API keys needed)**
+```bash
+python setup_test_env.py
+```
+
+**Option B: For production use**
+```bash
+cp env.example .env
+# Edit .env with your API keys and configuration
+```
+
+4. Start Redis (if not already running):
+```bash
+redis-server
+```
+
+5. Run the proxy:
+```bash
+python run_proxy.py
+```
+
+The proxy will start on the address and port configured in `llmproxy.yaml` (default: `http://127.0.0.1:5000`).
+
+### Usage
+
+Use any OpenAI-compatible client and point it to the proxy:
+
+```python
+from openai import OpenAI
+
+# Point to the local proxy instead of OpenAI
+# The proxy URL is configured in llmproxy.yaml
+client = OpenAI(
+    base_url="http://127.0.0.1:5000/v1",  # Match your llmproxy.yaml settings
+    api_key="dummy-key"  # Auth is handled by proxy
+)
+
+# Use as normal
+response = client.chat.completions.create(
+    model="gpt-3.5-turbo",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+```
+
+### Configuration
+
+Edit `llmproxy.yaml` to configure:
+
+- Model groups and endpoints
+- Weights for load distribution
+- Rate limiting and retry settings
+- Caching parameters
+- Bind address and port (default: 127.0.0.1:5000)
+
+See `llmproxy.yaml` for a complete example. The bind address and port are set in the `general_settings` section:
+
+```yaml
+general_settings:
+  bind_address: 127.0.0.1
+  bind_port: 5000
+  # ... other settings
+```
+
+### API Endpoints
+
+- `POST /v1/chat/completions` - OpenAI-compatible chat completions
+- `GET /health` - Health check endpoint
+- `GET /stats` - Proxy statistics and endpoint status
+
+## Architecture
+
+LLMProxy uses:
+- **FastAPI** for high-performance async request handling
+- **Redis** for caching and rate limit tracking
+- **httpx** for async HTTP client requests
+- **Pydantic** for configuration validation
+
+## Testing
+
+### Quick Start for Testing
+
+```bash
+# Start test environment (Redis + Proxy with test config)
+./start_test_environment.sh
+
+# In another terminal, run the demo (no API keys needed)
+python test_proxy_demo.py
+
+# Or run live tests (requires configured endpoints)
+python test_proxy_live.py
+```
+
+### Running Live Tests
+
+The `test_proxy_live.py` script tests the proxy with real LLM requests:
+
+```bash
+# Run all tests
+python test_proxy_live.py
+
+# Run quick test only
+python test_proxy_live.py --quick
+
+# Test against a different proxy URL
+python test_proxy_live.py --proxy-url http://localhost:8080
+```
+
+Tests include:
+- Basic chat completions
+- Streaming responses
+- Caching behavior
+- Error handling
+- Load balancing
+- Concurrent requests
+- Health and stats endpoints
+
+## Development
+
+### Running Unit Tests
+
+```bash
+pytest llmproxy/tests/
+```
+
+### Code Formatting
+
+```bash
+black llmproxy/
+flake8 llmproxy/
+```
+
+## License
+
+MIT License - see LICENSE file for details 
