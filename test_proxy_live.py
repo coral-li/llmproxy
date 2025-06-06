@@ -51,6 +51,7 @@ class ProxyTester:
                     {"role": "system", "content": "You are a helpful assistant. Be concise."},
                     {"role": "user", "content": "Say 'Hello from LLMProxy!' and nothing else."}
                 ],
+                extra_body={"cache": {"no-cache": True}},
             )
             
             duration = time.time() - start_time
@@ -90,7 +91,8 @@ class ProxyTester:
                 messages=[
                     {"role": "user", "content": "Count from 1 to 5, one number at a time."}
                 ],
-                stream=True
+                stream=True,
+                extra_body={"cache": {"no-cache": True}},
             )
             
             chunks = []
@@ -220,6 +222,7 @@ class ProxyTester:
                     messages=[
                         {"role": "user", "content": f"Say 'Request {i+1}' and nothing else."}
                     ],
+                    extra_body={"cache": {"no-cache": True}},
                 )
                 duration = time.time() - start
                 request_times.append(duration)
@@ -265,7 +268,8 @@ class ProxyTester:
                             "model": self.model,
                             "messages": [
                                 {"role": "user", "content": f"Say 'Concurrent {index}' and nothing else."}
-                            ]                        
+                            ],
+                            "extra_body": {"cache": {"no-cache": True}}
                         },
                         headers={"Authorization": "Bearer dummy-key"}
                     )

@@ -175,7 +175,7 @@ class ChatCompletionHandler:
 
                     return response
 
-                # Handle errors
+                # Handle errors - retry with different endpoint regardless of error type
                 error_msg = response.get("error", "Unknown error")
 
                 if response["status_code"] == 429:
@@ -200,16 +200,19 @@ class ChatCompletionHandler:
                     self.load_balancer.record_failure(endpoint, error_msg)
 
                 else:
-                    # Non-retryable error (like 400 Bad Request)
-                    logger.error(
-                        "non_retryable_error",
+                    # Non-retryable error (like 400 Bad Request) - still retry with different endpoint
+                    logger.warning(
+                        "non_retryable_error_retrying",
                         endpoint_id=endpoint.id,
                         status_code=response["status_code"],
                         error=error_msg[:200],
                     )
 
-                    # Don't mark endpoint as failed for client errors
-                    return response
+                    # Mark endpoint as failed and continue to next endpoint
+                    self.load_balancer.record_failure(endpoint, error_msg)
+
+                # Store the last response to return if all endpoints fail
+                last_response = response
 
             except Exception as e:
                 logger.error("request_exception", endpoint_id=endpoint.id, error=str(e))
@@ -225,13 +228,17 @@ class ChatCompletionHandler:
 
                     return {"status_code": 500, "data": error_stream()}
 
-        # All retries exhausted
-        return {
-            "status_code": 503,
-            "headers": {},
-            "data": None,
-            "error": "All endpoints failed after retries",
-        }
+        # All retries exhausted - return the last response we received
+        # If we have a last response, return that; otherwise return a generic error
+        if 'last_response' in locals():
+            return last_response
+        else:
+            return {
+                "status_code": 503,
+                "headers": {},
+                "data": None,
+                "error": "All endpoints failed after retries",
+            }
 
     def _filter_proxy_params(self, request_data: dict) -> dict:
         """Filter out proxy-specific parameters before sending to upstream provider"""
