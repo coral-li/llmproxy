@@ -20,10 +20,7 @@ def get_proxy_url(config_path: str = None) -> str:
     Returns:
         The proxy URL in the format http://{bind_address}:{bind_port}
     """
-    if config_path is None:
-        config_path = os.getenv("LLMPROXY_CONFIG", "llmproxy.yaml")
-    print(f"Loading config from {config_path}")
-    config = load_config(config_path)
+    config = load_config()
     host = config.general_settings.bind_address
     port = config.general_settings.bind_port
     return f"http://{host}:{port}"

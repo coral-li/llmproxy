@@ -86,6 +86,7 @@ class ProxyTester:
         
         start_time = time.time()
         try:
+            self.log("Creating streaming request...")
             stream = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -94,30 +95,110 @@ class ProxyTester:
                 stream=True,
                 extra_body={"cache": {"no-cache": True}},
             )
-            
+                        
             chunks = []
+            chunk_count = 0
             for chunk in stream:
-                if chunk.choices[0].delta.content:
+                chunk_count += 1
+                assert hasattr(chunk, 'choices') and len(chunk.choices) > 0, "No choices or empty choices"
+
+                assert hasattr(chunk.choices[0], 'delta'), "No delta in choices[0]"
+
+                if hasattr(chunk.choices[0].delta, 'content') and chunk.choices[0].delta.content:
                     chunks.append(chunk.choices[0].delta.content)
+            
+            self.log(f"Stream iteration completed. Total chunks processed: {chunk_count}")
             
             duration = time.time() - start_time
             full_response = "".join(chunks)
             
-            self.log(f"✅ Streaming success: {len(chunks)} chunks received (took {duration:.2f}s)")
+            # Check if we received the expected content (numbers 1-5)
+            # Different models may chunk differently, so we check for content not chunk count
+            has_all_numbers = all(str(i) in full_response for i in range(1, 6))
+            
+            # We should have received at least one chunk with content
+            min_chunks_required = 1
+            success = len(chunks) >= min_chunks_required and has_all_numbers
+            
+            if success:
+                self.log(f"✅ Streaming success: {len(chunks)} chunks received with all numbers 1-5 (took {duration:.2f}s)")
+            else:
+                if not has_all_numbers:
+                    missing_numbers = [str(i) for i in range(1, 6) if str(i) not in full_response]
+                    self.log(f"❌ Streaming failed: Missing numbers {missing_numbers} in response")
+                else:
+                    self.log(f"❌ Streaming failed: Only {len(chunks)} chunks received, expected at least {min_chunks_required}")
+            
             self.log(f"   Response: {full_response}")
             
             return {
                 "test": "streaming",
-                "success": True,
+                "success": success,
                 "duration": duration,
                 "chunks": len(chunks),
-                "response": full_response
+                "response": full_response,
+                "has_all_numbers": has_all_numbers,
+                "min_chunks_required": min_chunks_required
             }
             
         except Exception as e:
-            self.log(f"❌ Streaming failed: {str(e)}", "ERROR")
+            import traceback
+            self.log(f"❌ Streaming failed with exception: {str(e)}", "ERROR")
+            self.log(f"Traceback: {traceback.format_exc()}", "ERROR")
             return {
                 "test": "streaming",
+                "success": False,
+                "error": str(e)
+            }
+    
+    def test_streaming_raw_http(self) -> Dict[str, Any]:
+        """Test streaming response using raw HTTP to see what proxy returns"""
+        self.log("Testing streaming response with raw HTTP...")
+        
+        import httpx
+        
+        start_time = time.time()
+        try:
+            with httpx.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {"role": "user", "content": "Count from 1 to 5, one number at a time."}
+                    ],
+                    "stream": True,
+                    "extra_body": {"cache": {"no-cache": True}}
+                },
+                headers={"Authorization": "Bearer dummy-key"},
+                timeout=30.0
+            ) as response:
+                self.log(f"HTTP Response status: {response.status_code}")
+                self.log(f"HTTP Response headers: {dict(response.headers)}")
+                
+                lines = []
+                for line in response.iter_lines():
+                    self.log(f"Raw line: '{line}'")
+                    lines.append(line)
+                    if len(lines) >= 10:  # Limit to prevent too much output
+                        break
+                
+                self.log(f"Total lines received: {len(lines)}")
+                
+                return {
+                    "test": "streaming_raw_http",
+                    "success": response.status_code == 200,
+                    "status_code": response.status_code,
+                    "lines_count": len(lines),
+                    "first_few_lines": lines[:5]
+                }
+                
+        except Exception as e:
+            import traceback
+            self.log(f"❌ Raw HTTP streaming failed: {str(e)}", "ERROR")
+            self.log(f"Traceback: {traceback.format_exc()}", "ERROR")
+            return {
+                "test": "streaming_raw_http",
                 "success": False,
                 "error": str(e)
             }
@@ -345,6 +426,7 @@ class ProxyTester:
         tests = [
             self.test_basic_completion,
             self.test_streaming,
+            self.test_streaming_raw_http,
             self.test_caching,
             self.test_error_handling,
             lambda: self.test_load_balancing(5),  # Fewer requests for quick testing
@@ -440,6 +522,15 @@ def main():
         print("Running quick tests...\n")
         result = tester.test_basic_completion()
         tester.results.append(result)
+        
+        # Also test streaming specifically
+        streaming_result = tester.test_streaming()
+        tester.results.append(streaming_result)
+        
+        # Test raw HTTP streaming
+        raw_streaming_result = tester.test_streaming_raw_http()
+        tester.results.append(raw_streaming_result)
+        
         tester.print_summary()
     else:
         tester.run_all_tests()

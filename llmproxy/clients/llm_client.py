@@ -141,10 +141,48 @@ class LLMClient:
                     yield "data: [DONE]\n\n"
                     return
 
-                # Stream the response
+                # Stream the response - filter out problematic chunks
                 async for line in response.aiter_lines():
-                    if line:
-                        yield line + "\n"
+                    if line and line.startswith('data: '):
+                        # Skip the [DONE] marker
+                        if line == 'data: [DONE]':
+                            yield line + "\n\n"
+                            continue
+                            
+                        # Try to parse the data to filter out empty chunks
+                        try:
+                            data_str = line[6:]  # Remove 'data: ' prefix
+                            chunk_data = json.loads(data_str)
+                            
+                            # Filter out chunks with empty choices arrays
+                            if 'choices' in chunk_data and len(chunk_data['choices']) == 0:
+                                logger.debug("Filtering out chunk with empty choices array")
+                                continue
+                            
+                            # Filter out chunks with no meaningful content
+                            # (e.g., just role assignment without content)
+                            if 'choices' in chunk_data and len(chunk_data['choices']) > 0:
+                                choice = chunk_data['choices'][0]
+                                if 'delta' in choice:
+                                    delta = choice['delta']
+                                    # Skip if delta only contains role without content
+                                    if 'role' in delta and 'content' not in delta:
+                                        logger.debug("Filtering out chunk with only role assignment")
+                                        continue
+                                    # Don't filter out whitespace content - it's legitimate
+                                    # Only skip if content is exactly empty string ""
+                                    # Whitespace like "\n" or "  " should be kept
+                            
+                            # This chunk looks good, yield it
+                            yield line + "\n\n"
+                            
+                        except json.JSONDecodeError:
+                            # If we can't parse it, just forward it as-is
+                            logger.debug(f"Could not parse chunk, forwarding as-is: {line}")
+                            yield line + "\n\n"
+                    elif line:
+                        # Non-SSE formatted line, forward as-is
+                        yield line + "\n\n"
 
         except httpx.TimeoutException:
             logger.error("llm_stream_timeout", url=url, timeout=self.timeout)

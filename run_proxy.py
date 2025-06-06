@@ -18,17 +18,13 @@ if __name__ == "__main__":
     from llmproxy.main import app
     from llmproxy.config.config_loader import load_config
     import uvicorn
-    
-    # Get configuration path from environment or default
-    config_path = os.getenv("LLMPROXY_CONFIG", "llmproxy.yaml")
-    
+
     # Load configuration to get bind address and port
-    config = load_config(config_path)
+    config = load_config()
     host = config.general_settings.bind_address
     port = config.general_settings.bind_port
     
     print(f"Starting LLMProxy on {host}:{port}")
-    print(f"Using config: {config_path}")
     
     uvicorn.run(
         app,

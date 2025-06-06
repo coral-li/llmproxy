@@ -43,10 +43,7 @@ async def lifespan(app: FastAPI):
         load_dotenv()
         logger.info("loaded_env_file")
         
-        # Load configuration
-        config_path = os.getenv("LLMPROXY_CONFIG", "llmproxy.yaml")
-        logger.info("loading_config", path=config_path)
-        config = load_config(config_path)
+        config = load_config()
 
         # Initialize Redis
         logger.info("initializing_redis")
@@ -217,13 +214,10 @@ async def stats():
 
 if __name__ == "__main__":
     import uvicorn
-
-    # Get config path from environment or use default
-    config_path = os.getenv("LLMPROXY_CONFIG", "llmproxy.yaml")
     
     # Load configuration to get bind address and port
     from llmproxy.config.config_loader import load_config
-    main_config = load_config(config_path)
+    main_config = load_config()
     host = main_config.general_settings.bind_address
     port = main_config.general_settings.bind_port
 

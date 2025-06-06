@@ -42,7 +42,7 @@ def resolve_env_vars(data: Any) -> Any:
     return resolved_data
 
 
-def load_config(yaml_file_path: str) -> LLMProxyConfig:
+def load_config() -> LLMProxyConfig:
     """
     Load and validate YAML configuration using the Pydantic model
 
@@ -52,6 +52,7 @@ def load_config(yaml_file_path: str) -> LLMProxyConfig:
     Returns:
         Validated LLMProxyConfig instance
     """
+    yaml_file_path = "llmproxy.yaml"
     # Check if file exists
     if not os.path.exists(yaml_file_path):
         raise FileNotFoundError(f"Configuration file not found: {yaml_file_path}")
