@@ -164,7 +164,7 @@ async def general_exception_handler(request: Request, exc: Exception):
     )
 
 
-@app.post("/v1/chat/completions")
+@app.post("/chat/completions")
 async def chat_completions(request: Request):
     """OpenAI-compatible chat completions endpoint"""
     if not chat_handler:

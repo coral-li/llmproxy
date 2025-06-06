@@ -21,18 +21,17 @@ load_dotenv()
 class ProxyTester:
     """Test harness for LLMProxy"""
     
-    def __init__(self, proxy_url: str = None):
+    def __init__(self, base_url: str = None):
         """Initialize tester with proxy URL"""
-        if proxy_url is None:
-            proxy_url = get_proxy_url()
-        self.proxy_url = proxy_url
-        self.base_url = f"{proxy_url}/v1"
+        if base_url is None:
+            base_url = get_proxy_url()
+        self.base_url = base_url
         self.client = OpenAI(
             base_url=self.base_url,
         )
         self.results = []
         # Get a configured model from the proxy
-        self.model = get_configured_model(proxy_url)
+        self.model = get_configured_model(base_url)
         self.log(f"Using model: {self.model}")
     
     def log(self, message: str, level: str = "INFO"):
@@ -261,7 +260,7 @@ class ProxyTester:
                 # Use httpx for async requests
                 async with httpx.AsyncClient() as client:
                     response = await client.post(
-                        f"{self.proxy_url}/v1/chat/completions",
+                        f"{self.base_url}/chat/completions",
                         json={
                             "model": self.model,
                             "messages": [
@@ -307,11 +306,11 @@ class ProxyTester:
         
         async with httpx.AsyncClient() as client:
             # Check health
-            health_resp = await client.get(f"{self.proxy_url}/health")
+            health_resp = await client.get(f"{self.base_url}/health")
             health_data = health_resp.json() if health_resp.status_code == 200 else None
             
             # Check stats
-            stats_resp = await client.get(f"{self.proxy_url}/stats")
+            stats_resp = await client.get(f"{self.base_url}/stats")
             stats_data = stats_resp.json() if stats_resp.status_code == 200 else None
             
             if health_data:

@@ -88,6 +88,9 @@ class ChatCompletionHandler:
             response["data"]["_proxy_latency_ms"] = int(
                 (time.time() - start_time) * 1000
             )
+            # Add endpoint information if available
+            if response.get("endpoint_base_url"):
+                response["data"]["_proxy_endpoint_base_url"] = response["endpoint_base_url"]
 
         # Return appropriate response
         if is_streaming:
@@ -145,14 +148,17 @@ class ChatCompletionHandler:
                 # Handle streaming differently
                 if is_streaming and response.get("status_code") == 200:
                     # For streaming, return a streaming response
-                    return StreamingResponse(
+                    # Note: For streaming responses, endpoint info is added via headers
+                    streaming_response = StreamingResponse(
                         response["data"],
                         media_type="text/event-stream",
                         headers={
                             "Cache-Control": "no-cache",
                             "X-Accel-Buffering": "no",
+                            "X-Proxy-Endpoint-Base-Url": endpoint.params.get("base_url", "https://api.openai.com"),
                         },
                     )
+                    return streaming_response
 
                 # Check response status
                 if response["status_code"] == 200:
@@ -163,6 +169,9 @@ class ChatCompletionHandler:
                     await self.rate_limit_manager.update_from_headers(
                         endpoint.id, response["headers"]
                     )
+
+                    # Add endpoint information to response
+                    response["endpoint_base_url"] = endpoint.params.get("base_url", "https://api.openai.com")
 
                     return response
 
