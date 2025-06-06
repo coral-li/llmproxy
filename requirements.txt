@@ -1,0 +1,28 @@
+# Core
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+
+# Clients
+httpx
+openai
+
+# Redis
+redis
+hiredis
+
+# Configuration
+pyyaml
+python-dotenv
+
+# Testing
+pytest
+pytest-asyncio
+pytest-mock
+httpx-mock
+
+# Development
+black
+flake8
+mypy
