@@ -4,7 +4,7 @@ uvicorn[standard]
 pydantic
 pydantic-settings
 
-# Clients
+# HTTP Clients
 httpx
 openai
 
@@ -16,6 +16,9 @@ hiredis
 pyyaml
 python-dotenv
 
+# Logging
+structlog
+
 # Testing
 pytest
 pytest-asyncio
@@ -24,4 +27,3 @@ pytest-mock
 # Development
 black
 flake8
-mypy

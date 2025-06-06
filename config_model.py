@@ -13,6 +13,10 @@ class ModelGroup(BaseModel):
     """Configuration for a group of models"""
     model_group: str
     models: List[ModelConfig]
+    
+    model_config = {
+        'protected_namespaces': ()  # Disable protected namespace warning
+    }
 
 
 class CacheParams(BaseModel):
@@ -28,7 +32,7 @@ class CacheParams(BaseModel):
 class GeneralSettings(BaseModel):
     """General configuration settings"""
     bind_address: str = "127.0.0.1"
-    bind_port: int = 4000
+    bind_port: int
     num_retries: int = 3
     allowed_fails: int = 1
     cooldown_time: int = 60
@@ -43,7 +47,8 @@ class LLMProxyConfig(BaseModel):
     """Root configuration model for LLM Proxy"""
     model_groups: List[ModelGroup]
     general_settings: GeneralSettings
-
-    class Config:
-        # Allow extra fields in case the YAML has additional properties
-        extra = "allow" 
+    
+    model_config = {
+        'protected_namespaces': (),  # Disable protected namespace warning
+        'extra': 'allow'  # Allow extra fields in case the YAML has additional properties
+    } 

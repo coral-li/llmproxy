@@ -9,7 +9,7 @@ model_groups:
           api_key: os.environ/AZURE_OPENAI_API_KEY_O4_MINI_1
           base_url: os.environ/AZURE_OPENAI_ENDPOINT_O4_MINI_1
           default_query:
-            api-version: "preview"
+            api-version: os.environ/OPENAI_API_VERSION
 
       - model: o4-mini
         weight: 1
@@ -17,7 +17,7 @@ model_groups:
           api_key: os.environ/AZURE_OPENAI_API_KEY_O4_MINI_2
           base_url: os.environ/AZURE_OPENAI_ENDPOINT_O4_MINI_2
           default_query:
-            api-version: "preview"
+            api-version: os.environ/OPENAI_API_VERSION
 
       # OpenAI (fallback with weight 0, only gets traffic if all other endpoints are cooled down)
       - model: o4-mini
@@ -35,7 +35,7 @@ model_groups:
           api_key: os.environ/AZURE_OPENAI_API_KEY_GPT_4_POINT_1_1
           base_url: os.environ/AZURE_OPENAI_ENDPOINT_GPT_4_POINT_1_1
           default_query:
-            api-version: "preview"
+            api-version: os.environ/OPENAI_API_VERSION
 
       - model: gpt-4.1
         weight: 1
@@ -43,7 +43,7 @@ model_groups:
           api_key: os.environ/AZURE_OPENAI_API_KEY_GPT_4_POINT_1_2
           base_url: os.environ/AZURE_OPENAI_ENDPOINT_GPT_4_POINT_1_2
           default_query:
-            api-version: "preview"
+            api-version: os.environ/OPENAI_API_VERSION
 
       # OpenAI (fallback)
       - model: gpt-4.1
@@ -52,8 +52,8 @@ model_groups:
           api_key: os.environ/OPENAI_API_KEY
 
 general_settings:
-  bind_address: 127.0.0.1
-  bind_port: 4000
+  bind_address: localhost
+  bind_port: 4243
   num_retries: 3 # number of retries for each request
   allowed_fails: 1 # number of allowed fails for each endpoint
   cooldown_time: 60 # cooldown time for each endpoint
