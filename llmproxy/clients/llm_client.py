@@ -57,13 +57,7 @@ class LLMClient:
         )
 
         if is_azure:
-            # Azure URL without deployment - try to extract from endpoint URL
-            if "/openai/deployments/" in endpoint_url:
-                # Deployment already in URL
-                url = f"{endpoint_url}/chat/completions"
-            else:
-                # Correct URL format: /openai/deployments/gpt-4.1/chat/completions
-                url = f"{endpoint_url}/openai/v1/chat/completions"
+            url = urljoin(endpoint_url + "/", "openai/v1/chat/completions")
         else:
             # Standard OpenAI URL
             url = urljoin(endpoint_url + "/", "v1/chat/completions")
