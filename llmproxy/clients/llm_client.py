@@ -62,13 +62,8 @@ class LLMClient:
                 # Deployment already in URL
                 url = f"{endpoint_url}/chat/completions"
             else:
-                # This will likely fail, but log it
-                logger.warning(
-                    "azure_endpoint_without_deployment",
-                    endpoint_url=endpoint_url
-                )
                 # Correct URL format: /openai/deployments/gpt-4.1/chat/completions
-                url = f"{endpoint_url}/openai/deployments/{model}/chat/completions"
+                url = f"{endpoint_url}/openai/v1/"
         else:
             # Standard OpenAI URL
             url = urljoin(endpoint_url + "/", "v1/chat/completions")
