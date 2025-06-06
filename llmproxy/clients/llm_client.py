@@ -4,6 +4,7 @@ import json
 from urllib.parse import urljoin
 from pathlib import Path
 import sys
+import time
 
 # Add parent to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
@@ -16,7 +17,7 @@ logger = get_logger(__name__)
 class LLMClient:
     """Unified client for OpenAI and Azure OpenAI endpoints"""
 
-    def __init__(self, timeout: float = 60.0):
+    def __init__(self, timeout: float = 6000.0):
         self.timeout = timeout
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
@@ -73,10 +74,26 @@ class LLMClient:
 
     async def _request(self, url: str, headers: dict, params: dict, data: dict) -> dict:
         """Make non-streaming request"""
+        request_start_time = time.time()
+        
         try:
+            # Log full request details for debugging (with sanitized headers)
+            sanitized_headers = {k: v if k.lower() != 'authorization' else 'Bearer <REDACTED>' for k, v in headers.items()}
+            logger.debug(
+                "llm_request_details",
+                url=url,
+                headers=sanitized_headers,
+                params=params,
+                request_body_sample=str(data)[:500] if data else None,  # First 500 chars of request
+                model=data.get("model") if data else None,
+            )
+            
             response = await self.client.post(
                 url, headers=headers, params=params, json=data
             )
+
+            # Calculate request duration
+            request_duration_ms = int((time.time() - request_start_time) * 1000)
 
             # Parse response
             response_data = None
@@ -84,13 +101,39 @@ class LLMClient:
 
             if response.status_code == 200:
                 response_data = response.json()
+                logger.debug(
+                    "llm_request_success",
+                    url=url,
+                    status_code=response.status_code,
+                    duration_ms=request_duration_ms,
+                )
             else:
                 error = response.text
-                logger.error(
-                    "llm_request_error",
-                    status_code=response.status_code,
-                    error=error[:500],
-                )  # Truncate long errors
+                
+                # Enhanced error logging for debugging
+                error_details = {
+                    "status_code": response.status_code,
+                    "url": url,
+                    "method": "POST",
+                    "duration_ms": request_duration_ms,
+                    "response_headers": dict(response.headers),
+                    "error_body": error,
+                    "request_model": data.get("model") if data else None,
+                    "request_size": len(json.dumps(data)) if data else 0,
+                }
+                
+                # For 500 errors, log full details
+                if response.status_code >= 500:
+                    logger.error(
+                        "llm_request_server_error",
+                        **error_details,
+                        request_body=data,  # Include full request for 500 errors
+                    )
+                else:
+                    logger.error(
+                        "llm_request_error",
+                        **error_details,
+                    )
 
             # Return response with headers for rate limit parsing
             return {
@@ -98,36 +141,92 @@ class LLMClient:
                 "headers": dict(response.headers),
                 "data": response_data,
                 "error": error,
+                "duration_ms": request_duration_ms,
             }
 
         except httpx.TimeoutException as e:
-            logger.error("llm_request_timeout", url=url, timeout=self.timeout)
+            duration_ms = int((time.time() - request_start_time) * 1000)
+            logger.error(
+                "llm_request_timeout", 
+                url=url, 
+                timeout=self.timeout,
+                duration_ms=duration_ms,
+                request_model=data.get("model") if data else None,
+            )
             return {
                 "status_code": 504,
                 "headers": {},
                 "data": None,
                 "error": f"Request timeout after {self.timeout}s",
+                "duration_ms": duration_ms,
             }
         except Exception as e:
-            logger.error("llm_request_exception", url=url, error=str(e))
-            return {"status_code": 500, "headers": {}, "data": None, "error": str(e)}
+            duration_ms = int((time.time() - request_start_time) * 1000)
+            logger.error(
+                "llm_request_exception", 
+                url=url, 
+                error=str(e),
+                error_type=type(e).__name__,
+                duration_ms=duration_ms,
+                request_model=data.get("model") if data else None,
+            )
+            return {
+                "status_code": 500, 
+                "headers": {}, 
+                "data": None, 
+                "error": str(e),
+                "duration_ms": duration_ms,
+            }
 
     async def _stream_request(
         self, url: str, headers: dict, params: dict, data: dict
     ) -> AsyncIterator[str]:
         """Make streaming request"""
+        import time
+        request_start_time = time.time()
+        
         try:
+            # Log request details for debugging
+            sanitized_headers = {k: v if k.lower() != 'authorization' else 'Bearer <REDACTED>' for k, v in headers.items()}
+            logger.debug(
+                "llm_stream_request_start",
+                url=url,
+                headers=sanitized_headers,
+                params=params,
+                model=data.get("model") if data else None,
+            )
+            
             async with self.client.stream(
                 "POST", url, headers=headers, params=params, json=data
             ) as response:
                 # For streaming, we need to check status before yielding
                 if response.status_code != 200:
                     error_text = await response.aread()
-                    logger.error(
-                        "llm_stream_error",
-                        status_code=response.status_code,
-                        error=error_text.decode()[:500],
-                    )
+                    duration_ms = int((time.time() - request_start_time) * 1000)
+                    
+                    # Enhanced error logging for streaming
+                    error_details = {
+                        "status_code": response.status_code,
+                        "url": url,
+                        "method": "POST",
+                        "duration_ms": duration_ms,
+                        "response_headers": dict(response.headers),
+                        "error_body": error_text.decode(),
+                        "request_model": data.get("model") if data else None,
+                        "streaming": True,
+                    }
+                    
+                    if response.status_code >= 500:
+                        logger.error(
+                            "llm_stream_server_error",
+                            **error_details,
+                            request_body=data,  # Include full request for 500 errors
+                        )
+                    else:
+                        logger.error(
+                            "llm_stream_error",
+                            **error_details,
+                        )
 
                     # Yield error in SSE format
                     error_data = {
@@ -185,7 +284,14 @@ class LLMClient:
                         yield line + "\n\n"
 
         except httpx.TimeoutException:
-            logger.error("llm_stream_timeout", url=url, timeout=self.timeout)
+            duration_ms = int((time.time() - request_start_time) * 1000)
+            logger.error(
+                "llm_stream_timeout", 
+                url=url, 
+                timeout=self.timeout,
+                duration_ms=duration_ms,
+                request_model=data.get("model") if data else None,
+            )
             error_data = {
                 "error": {
                     "message": f"Request timeout after {self.timeout}s",
@@ -197,7 +303,149 @@ class LLMClient:
             yield "data: [DONE]\n\n"
 
         except Exception as e:
-            logger.error("llm_stream_exception", url=url, error=str(e))
+            duration_ms = int((time.time() - request_start_time) * 1000)
+            logger.error(
+                "llm_stream_exception", 
+                url=url, 
+                error=str(e),
+                error_type=type(e).__name__,
+                duration_ms=duration_ms,
+                request_model=data.get("model") if data else None,
+            )
+            error_data = {
+                "error": {"message": str(e), "type": "client_error", "code": 500}
+            }
+            yield f"data: {json.dumps(error_data)}\n\n"
+            yield "data: [DONE]\n\n"
+
+    async def create_response(
+        self,
+        model: str,
+        endpoint_url: str,
+        api_key: str,
+        request_data: dict,
+        default_query: Optional[dict] = None,
+        stream: bool = False,
+    ) -> Union[dict, AsyncIterator[str]]:
+        """Make response API request to OpenAI-compatible endpoint"""
+
+        # Prepare headers
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        # Handle Azure OpenAI query parameters
+        params = default_query or {}
+
+        # Build full URL
+        if endpoint_url.endswith("/"):
+            endpoint_url = endpoint_url[:-1]
+
+        # Detect Azure OpenAI endpoints
+        is_azure = (
+            "azure.com" in endpoint_url
+        )
+
+        if is_azure:
+            # Azure OpenAI may have different URL pattern for responses
+            url = urljoin(endpoint_url + "/", "openai/v1/responses")
+        else:
+            # Standard OpenAI URL for responses
+            url = urljoin(endpoint_url + "/", "v1/responses")
+
+        logger.debug(
+            "llm_response_request", url=url, model=request_data.get("model"), stream=stream
+        )
+
+        if stream:
+            return self._stream_response_request(url, headers, params, request_data)
+        else:
+            return await self._request(url, headers, params, request_data)
+
+    async def _stream_response_request(
+        self, url: str, headers: dict, params: dict, data: dict
+    ) -> AsyncIterator[str]:
+        """Make streaming request for Responses API"""
+        try:
+            async with self.client.stream(
+                "POST", url, headers=headers, params=params, json=data
+            ) as response:
+                # For streaming, we need to check status before yielding
+                if response.status_code != 200:
+                    error_text = await response.aread()
+                    logger.error(
+                        "llm_response_stream_error",
+                        status_code=response.status_code,
+                        error=error_text.decode()[:500],
+                    )
+
+                    # Yield error in SSE format
+                    error_data = {
+                        "error": {
+                            "message": error_text.decode(),
+                            "type": "api_error",
+                            "code": response.status_code,
+                        }
+                    }
+                    yield f"data: {json.dumps(error_data)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+
+                # Stream the response - Responses API may have different streaming format
+                async for line in response.aiter_lines():
+                    if line and line.startswith('data: '):
+                        # Skip the [DONE] marker
+                        if line == 'data: [DONE]':
+                            yield line + "\n\n"
+                            continue
+                            
+                        # Try to parse the data to filter out empty events
+                        try:
+                            data_str = line[6:]  # Remove 'data: ' prefix
+                            event_data = json.loads(data_str)
+                            
+                            # For Responses API, we filter based on event types
+                            # Skip events without meaningful content
+                            if 'type' in event_data:
+                                event_type = event_data['type']
+                                
+                                # Skip certain administrative events if needed
+                                if event_type in ['response.start', 'response.end']:
+                                    # These events might be kept for state tracking
+                                    pass
+                                
+                                # For message events, ensure they have content
+                                if event_type == 'message' and 'content' in event_data:
+                                    if not event_data['content']:
+                                        logger.debug("Filtering out message event with empty content")
+                                        continue
+                            
+                            # This event looks good, yield it
+                            yield line + "\n\n"
+                            
+                        except json.JSONDecodeError:
+                            # If we can't parse it, just forward it as-is
+                            logger.debug(f"Could not parse response event, forwarding as-is: {line}")
+                            yield line + "\n\n"
+                    elif line:
+                        # Non-SSE formatted line, forward as-is
+                        yield line + "\n\n"
+
+        except httpx.TimeoutException:
+            logger.error("llm_response_stream_timeout", url=url, timeout=self.timeout)
+            error_data = {
+                "error": {
+                    "message": f"Request timeout after {self.timeout}s",
+                    "type": "timeout_error",
+                    "code": 504,
+                }
+            }
+            yield f"data: {json.dumps(error_data)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        except Exception as e:
+            logger.error("llm_response_stream_exception", url=url, error=str(e))
             error_data = {
                 "error": {"message": str(e), "type": "client_error", "code": 500}
             }

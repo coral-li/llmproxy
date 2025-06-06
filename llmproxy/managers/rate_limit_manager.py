@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 import redis.asyncio as redis
 import json
+import re
 from llmproxy.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -15,6 +16,42 @@ class RateLimitManager:
         self.redis = redis_client
         self._local_cache: Dict[str, dict] = {}
         self._lock = asyncio.Lock()
+
+    def _parse_duration_string(self, duration_str: str) -> timedelta:
+        """
+        Parse OpenAI's duration string format into a timedelta object.
+        Examples: '12ms', '4m12.172s', '23h18m29.144s'
+        """
+        if not duration_str:
+            return timedelta(0)
+        
+        total_seconds = 0.0
+        
+        # Check if it's just milliseconds
+        ms_match = re.match(r'^(\d+(?:\.\d+)?)ms$', duration_str)
+        if ms_match:
+            total_seconds = float(ms_match.group(1)) / 1000
+            return timedelta(seconds=total_seconds)
+        
+        # Otherwise parse hours, minutes, seconds
+        # Pattern to match components like 23h18m29.144s
+        pattern = r'(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)s)?'
+        match = re.fullmatch(pattern, duration_str)
+        
+        if not match or not any(match.groups()):
+            logger.warning(f"Could not parse duration string: {duration_str}")
+            return timedelta(seconds=60)  # Default to 60 seconds
+        
+        hours, minutes, seconds = match.groups()
+        
+        if hours:
+            total_seconds += float(hours) * 3600
+        if minutes:
+            total_seconds += float(minutes) * 60
+        if seconds:
+            total_seconds += float(seconds)
+        
+        return timedelta(seconds=total_seconds)
 
     async def check_availability(self, endpoint_id: str) -> Tuple[bool, Optional[int]]:
         """
@@ -51,15 +88,28 @@ class RateLimitManager:
             # Calculate wait time based on earliest reset
             wait_times = []
 
+            # Handle reset times - they could be either ISO datetime strings or duration strings
             if reset_requests:
-                reset_time = datetime.fromisoformat(reset_requests)
-                if reset_time > now:
-                    wait_times.append((reset_time - now).total_seconds())
+                try:
+                    # First try to parse as ISO datetime
+                    reset_time = datetime.fromisoformat(reset_requests)
+                    if reset_time > now:
+                        wait_times.append((reset_time - now).total_seconds())
+                except (ValueError, TypeError):
+                    # If that fails, try to parse as duration string
+                    duration = self._parse_duration_string(reset_requests)
+                    wait_times.append(duration.total_seconds())
 
             if reset_tokens:
-                reset_time = datetime.fromisoformat(reset_tokens)
-                if reset_time > now:
-                    wait_times.append((reset_time - now).total_seconds())
+                try:
+                    # First try to parse as ISO datetime
+                    reset_time = datetime.fromisoformat(reset_tokens)
+                    if reset_time > now:
+                        wait_times.append((reset_time - now).total_seconds())
+                except (ValueError, TypeError):
+                    # If that fails, try to parse as duration string
+                    duration = self._parse_duration_string(reset_tokens)
+                    wait_times.append(duration.total_seconds())
 
             wait_seconds = int(min(wait_times)) if wait_times else 60  # Default 60s
 
@@ -101,6 +151,8 @@ class RateLimitManager:
                 data["limit_requests"] = int(limit_requests)
             if limit_tokens is not None:
                 data["limit_tokens"] = int(limit_tokens)
+            
+            # Store reset times as duration strings - they'll be parsed when needed
             if reset_requests:
                 data["reset_requests"] = reset_requests
             if reset_tokens:

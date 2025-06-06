@@ -18,6 +18,7 @@ from llmproxy.core.redis_manager import RedisManager
 from llmproxy.core.logger import get_logger, setup_logging
 from llmproxy.clients.llm_client import LLMClient
 from llmproxy.api.chat_completions import ChatCompletionHandler
+from llmproxy.api.responses import ResponseHandler
 
 # Setup logging
 setup_logging(os.getenv("LOG_LEVEL", "INFO"))
@@ -31,12 +32,13 @@ cache_manager = None
 llm_client = None
 redis_manager = None
 chat_handler = None
+response_handler = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle"""
-    global config, load_balancer, rate_limit_manager, cache_manager, llm_client, redis_manager, chat_handler
+    global config, load_balancer, rate_limit_manager, cache_manager, llm_client, redis_manager, chat_handler, response_handler
 
     try:
         # Load environment variables from .env file
@@ -88,6 +90,15 @@ async def lifespan(app: FastAPI):
 
         # Create chat handler
         chat_handler = ChatCompletionHandler(
+            load_balancer=load_balancer,
+            rate_limit_manager=rate_limit_manager,
+            cache_manager=cache_manager,
+            llm_client=llm_client,
+            config=config,
+        )
+
+        # Create response handler
+        response_handler = ResponseHandler(
             load_balancer=load_balancer,
             rate_limit_manager=rate_limit_manager,
             cache_manager=cache_manager,
@@ -181,6 +192,29 @@ async def chat_completions(request: Request):
         raise
     except Exception as e:
         logger.error("chat_completion_error", error=str(e))
+        raise HTTPException(500, str(e))
+
+
+@app.post("/responses")
+async def responses(request: Request):
+    """OpenAI-compatible responses API endpoint"""
+    if not response_handler:
+        raise HTTPException(503, "Service not ready")
+
+    try:
+        request_data = await request.json()
+        response = await response_handler.handle_request(request_data)
+        
+        # If it's already a StreamingResponse, return it directly
+        if isinstance(response, StreamingResponse):
+            return response
+        
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("response_api_error", error=str(e))
         raise HTTPException(500, str(e))
 
 

@@ -20,8 +20,8 @@ from core.logger import get_logger
 logger = get_logger(__name__)
 
 
-class ChatCompletionHandler:
-    """Handles chat completion requests with load balancing, caching, and retries"""
+class ResponseHandler:
+    """Handles response API requests with load balancing, caching, and retries"""
 
     def __init__(
         self,
@@ -38,7 +38,7 @@ class ChatCompletionHandler:
         self.config = config
 
     async def handle_request(self, request_data: dict) -> Any:
-        """Handle incoming chat completion request"""
+        """Handle incoming response API request"""
         start_time = time.time()
 
         # Extract model and determine model group
@@ -46,8 +46,7 @@ class ChatCompletionHandler:
         if not model:
             raise HTTPException(400, "Model is required")
 
-        # Map model to model group (for now, assume model == model_group)
-        # In production, you might have a mapping like gpt-4-turbo -> gpt-4.1
+        # Map model to model group
         model_group = model
 
         # Check if model group exists
@@ -148,7 +147,6 @@ class ChatCompletionHandler:
                 # Handle streaming differently
                 if is_streaming and response.get("status_code") == 200:
                     # For streaming, return a streaming response
-                    # Note: For streaming responses, endpoint info is added via headers
                     streaming_response = StreamingResponse(
                         response["data"],
                         media_type="text/event-stream",
@@ -179,7 +177,7 @@ class ChatCompletionHandler:
                 error_msg = response.get("error", "Unknown error")
 
                 if response["status_code"] == 429:
-                    # Rate limit hit - this shouldn't happen often due to pre-checks
+                    # Rate limit hit
                     logger.warning("rate_limit_hit", endpoint_id=endpoint.id)
                     self.load_balancer.record_failure(endpoint, "Rate limit exceeded")
 
@@ -195,17 +193,31 @@ class ChatCompletionHandler:
                         endpoint_id=endpoint.id,
                         status_code=response["status_code"],
                         error=error_msg[:200],
+                        endpoint_base_url=endpoint.params.get("base_url"),
+                        model_group=model_group,
+                        attempt=attempt + 1,
+                        max_attempts=self.config.general_settings.num_retries,
+                        duration_ms=response.get("duration_ms"),
+                        response_headers=response.get("headers", {}),
+                        request_model=request_data.get("model"),
                     )
 
                     self.load_balancer.record_failure(endpoint, error_msg)
 
                 else:
-                    # Non-retryable error (like 400 Bad Request) - still retry with different endpoint
+                    # Non-retryable error - still retry with different endpoint
                     logger.warning(
                         "non_retryable_error_retrying",
                         endpoint_id=endpoint.id,
                         status_code=response["status_code"],
                         error=error_msg[:200],
+                        endpoint_base_url=endpoint.params.get("base_url"),
+                        model_group=model_group,
+                        attempt=attempt + 1,
+                        max_attempts=self.config.general_settings.num_retries,
+                        duration_ms=response.get("duration_ms"),
+                        response_headers=response.get("headers", {}),
+                        request_model=request_data.get("model"),
                     )
 
                     # Mark endpoint as failed and continue to next endpoint
@@ -221,15 +233,15 @@ class ChatCompletionHandler:
 
                 # For streaming, return error in SSE format
                 if is_streaming:
+                    error_message = str(e)  # Capture error message for the inner function
 
                     async def error_stream():
-                        yield f'data: {{"error": {{"message": "{str(e)}", "type": "proxy_error"}}}}\n\n'
+                        yield f'data: {{"error": {{"message": "{error_message}", "type": "proxy_error"}}}}\n\n'
                         yield "data: [DONE]\n\n"
 
                     return {"status_code": 500, "data": error_stream()}
 
         # All retries exhausted - return the last response we received
-        # If we have a last response, return that; otherwise return a generic error
         if 'last_response' in locals():
             return last_response
         else:
@@ -277,7 +289,7 @@ class ChatCompletionHandler:
         filtered_data["model"] = endpoint.model
 
         logger.info(
-            "making_request",
+            "making_response_request",
             endpoint_id=endpoint.id,
             model=request_data.get("model"),
             endpoint_model=endpoint.model,
@@ -290,7 +302,7 @@ class ChatCompletionHandler:
         request_size = len(str(filtered_data))
         if request_size > 10_000_000:  # 10MB
             logger.warning(
-                "large_chat_completion_request",
+                "large_response_request",
                 endpoint_id=endpoint.id,
                 model=request_data.get("model"),
                 size_mb=round(request_size / 1_000_000, 2),
@@ -299,7 +311,7 @@ class ChatCompletionHandler:
             )
 
         # Make the request
-        response = await self.llm_client.create_chat_completion(
+        response = await self.llm_client.create_response(
             model=endpoint.model,
             endpoint_url=base_url,
             api_key=api_key,
@@ -319,7 +331,7 @@ class ChatCompletionHandler:
         # Log response details for non-streaming
         if response.get("status_code") != 200:
             logger.debug(
-                "chat_completion_request_failed",
+                "response_request_failed",
                 endpoint_id=endpoint.id,
                 endpoint_base_url=base_url,
                 status_code=response.get("status_code"),
@@ -327,4 +339,4 @@ class ChatCompletionHandler:
                 error_summary=str(response.get("error", ""))[:200],
             )
 
-        return response
+        return response 

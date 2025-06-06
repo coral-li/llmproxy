@@ -8,9 +8,10 @@ A high-performance proxy server for Large Language Models (LLMs) that provides i
 - **Automatic Failover**: Seamlessly switch to backup endpoints when primary endpoints fail
 - **Rate Limit Management**: Track and respect API rate limits to prevent 429 errors
 - **Response Caching**: Cache deterministic responses in Redis for improved performance
-- **OpenAI Compatible**: Drop-in replacement for OpenAI API clients
+- **OpenAI Compatible**: Drop-in replacement for OpenAI API clients (both Chat Completions and Responses APIs)
 - **Multi-Provider Support**: Works with OpenAI and Azure OpenAI endpoints
 - **Health Monitoring**: Track endpoint health and automatically cooldown failed endpoints
+- **Responses API Support**: Full support for OpenAI's new Responses API with conversation state management
 
 ## Quick Start
 
@@ -62,6 +63,8 @@ The proxy will start on the address and port configured in `llmproxy.yaml` (defa
 
 Use any OpenAI-compatible client and point it to the proxy:
 
+#### Chat Completions API
+
 ```python
 from openai import OpenAI
 
@@ -77,6 +80,26 @@ response = client.chat.completions.create(
     model="gpt-3.5-turbo",
     messages=[{"role": "user", "content": "Hello!"}]
 )
+```
+
+#### Responses API (New)
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:5000",  # No /v1 prefix for Responses API
+    api_key="dummy-key"
+)
+
+# Use the new Responses API
+response = client.responses.create(
+    model="gpt-4.1",
+    input=[{"role": "user", "content": "Hello!"}]
+)
+
+# Access the response
+print(response.output_text)
 ```
 
 ### Configuration
@@ -101,8 +124,20 @@ general_settings:
 ### API Endpoints
 
 - `POST /v1/chat/completions` - OpenAI-compatible chat completions
+- `POST /responses` - OpenAI's new Responses API
 - `GET /health` - Health check endpoint
 - `GET /stats` - Proxy statistics and endpoint status
+
+### Responses API Features
+
+The proxy fully supports OpenAI's new Responses API, including:
+
+- **Conversation State**: Use `previous_response_id` to maintain conversation context
+- **Semantic Events**: Better streaming support with typed events
+- **Future Tools**: Ready for web search, file search, and computer use tools
+- **Structured Outputs**: Use `text.format` for structured responses
+
+See [RESPONSES_API.md](RESPONSES_API.md) for detailed documentation on using the Responses API.
 
 ## Architecture
 
