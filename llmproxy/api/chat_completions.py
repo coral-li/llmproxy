@@ -56,6 +56,33 @@ class ChatCompletionHandler:
 
         is_streaming = request_data.get("stream", False)
 
+        # Check cache for streaming requests
+        if self.config.general_settings.cache and is_streaming:
+            cached_chunks = await self.cache_manager.get_streaming(request_data)
+            if cached_chunks:
+                # Create a streaming response from cached chunks
+                async def stream_cached_response():
+                    for chunk in cached_chunks:
+                        yield chunk
+                
+                logger.info(
+                    "serving_cached_streaming_response",
+                    model=model,
+                    num_chunks=len(cached_chunks),
+                    latency_ms=int((time.time() - start_time) * 1000)
+                )
+                
+                return StreamingResponse(
+                    stream_cached_response(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",
+                        "X-Proxy-Cache-Hit": "true",
+                        "X-Proxy-Latency-Ms": str(int((time.time() - start_time) * 1000)),
+                    },
+                )
+
         # Check cache for non-streaming requests
         if self.config.general_settings.cache and not is_streaming:
             cached_response = await self.cache_manager.get(request_data)
@@ -147,17 +174,42 @@ class ChatCompletionHandler:
 
                 # Handle streaming differently
                 if is_streaming and response.get("status_code") == 200:
-                    # For streaming, return a streaming response
-                    # Note: For streaming responses, endpoint info is added via headers
-                    streaming_response = StreamingResponse(
-                        response["data"],
-                        media_type="text/event-stream",
-                        headers={
-                            "Cache-Control": "no-cache",
-                            "X-Accel-Buffering": "no",
-                            "X-Proxy-Endpoint-Base-Url": endpoint.params.get("base_url", "https://api.openai.com"),
-                        },
-                    )
+                    # Check if caching is enabled for this request
+                    should_cache = self.cache_manager._should_cache(request_data, ignore_streaming=True)
+                    
+                    if self.config.general_settings.cache and should_cache:
+                        # Create a caching interceptor
+                        cache_writer = await self.cache_manager.create_streaming_cache_writer(request_data)
+                        
+                        # Wrap the stream with caching
+                        async def cached_stream():
+                            async for chunk in cache_writer.intercept_stream(response["data"]):
+                                yield chunk
+                        
+                        # Return streaming response with caching
+                        streaming_response = StreamingResponse(
+                            cached_stream(),
+                            media_type="text/event-stream",
+                            headers={
+                                "Cache-Control": "no-cache",
+                                "X-Accel-Buffering": "no",
+                                "X-Proxy-Endpoint-Base-Url": endpoint.params.get("base_url", "https://api.openai.com"),
+                                "X-Proxy-Cache-Hit": "false",
+                            },
+                        )
+                    else:
+                        # Return streaming response without caching
+                        streaming_response = StreamingResponse(
+                            response["data"],
+                            media_type="text/event-stream",
+                            headers={
+                                "Cache-Control": "no-cache",
+                                "X-Accel-Buffering": "no",
+                                "X-Proxy-Endpoint-Base-Url": endpoint.params.get("base_url", "https://api.openai.com"),
+                                "X-Proxy-Cache-Hit": "false",
+                            },
+                        )
+                    
                     return streaming_response
 
                 # Check response status
@@ -178,38 +230,36 @@ class ChatCompletionHandler:
                 # Handle errors - retry with different endpoint regardless of error type
                 error_msg = response.get("error", "Unknown error")
 
-                if response["status_code"] == 429:
-                    # Rate limit hit - this shouldn't happen often due to pre-checks
-                    logger.warning("rate_limit_hit", endpoint_id=endpoint.id)
-                    self.load_balancer.record_failure(endpoint, "Rate limit exceeded")
+                # Check if error is retryable
+                if is_retryable_error(response["status_code"], error_msg):
+                    # Record failure and continue to next endpoint
+                    self.load_balancer.record_failure(endpoint, error_msg)
 
-                    # Update rate limits from headers
-                    await self.rate_limit_manager.update_from_headers(
-                        endpoint.id, response["headers"]
-                    )
-
-                elif is_retryable_error(response["status_code"]):
-                    # Retryable error
                     logger.warning(
                         "retryable_error",
                         endpoint_id=endpoint.id,
                         status_code=response["status_code"],
                         error=error_msg[:200],
+                        attempt=attempt + 1,
+                        max_attempts=self.config.general_settings.num_retries,
                     )
 
-                    self.load_balancer.record_failure(endpoint, error_msg)
-
                 else:
-                    # Non-retryable error (like 400 Bad Request) - still retry with different endpoint
+                    # Non-retryable error - still retry with different endpoint
+                    # Don't record failure since it's likely a client error, not endpoint fault
                     logger.warning(
                         "non_retryable_error_retrying",
                         endpoint_id=endpoint.id,
                         status_code=response["status_code"],
                         error=error_msg[:200],
+                        endpoint_base_url=endpoint.params.get("base_url"),
+                        model_group=model_group,
+                        attempt=attempt + 1,
+                        max_attempts=self.config.general_settings.num_retries,
+                        duration_ms=response.get("duration_ms"),
+                        response_headers=response.get("headers", {}),
+                        request_model=request_data.get("model"),
                     )
-
-                    # Mark endpoint as failed and continue to next endpoint
-                    self.load_balancer.record_failure(endpoint, error_msg)
 
                 # Store the last response to return if all endpoints fail
                 last_response = response
@@ -221,15 +271,15 @@ class ChatCompletionHandler:
 
                 # For streaming, return error in SSE format
                 if is_streaming:
+                    error_message = str(e)  # Capture error message for the inner function
 
                     async def error_stream():
-                        yield f'data: {{"error": {{"message": "{str(e)}", "type": "proxy_error"}}}}\n\n'
+                        yield f'data: {{"error": {{"message": "{error_message}", "type": "proxy_error"}}}}\n\n'
                         yield "data: [DONE]\n\n"
 
                     return {"status_code": 500, "data": error_stream()}
 
         # All retries exhausted - return the last response we received
-        # If we have a last response, return that; otherwise return a generic error
         if 'last_response' in locals():
             return last_response
         else:
@@ -241,23 +291,16 @@ class ChatCompletionHandler:
             }
 
     def _filter_proxy_params(self, request_data: dict) -> dict:
-        """Filter out proxy-specific parameters before sending to upstream provider"""
-        # Define proxy-specific parameters that should not be forwarded
-        proxy_params = {"cache"}
-        
-        # Create a copy and remove proxy-specific parameters
-        filtered_data = {}
-        for key, value in request_data.items():
-            if key not in proxy_params:
-                # Handle extra_body specially - filter out proxy cache params
-                if key == "extra_body" and isinstance(value, dict):
-                    filtered_extra_body = {k: v for k, v in value.items() if k != "cache"}
-                    if filtered_extra_body:  # Only include if not empty
-                        filtered_data[key] = filtered_extra_body
-                else:
-                    filtered_data[key] = value
-        
-        return filtered_data
+        """Filter out proxy-specific parameters from request data"""
+        # Create a copy
+        filtered = request_data.copy()
+
+        # Remove proxy-specific fields
+        proxy_fields = ["cache", "extra_body"]
+        for field in proxy_fields:
+            filtered.pop(field, None)
+
+        return filtered
 
     async def _make_request(
         self, endpoint: Endpoint, request_data: dict, is_streaming: bool
@@ -290,7 +333,7 @@ class ChatCompletionHandler:
         request_size = len(str(filtered_data))
         if request_size > 10_000_000:  # 10MB
             logger.warning(
-                "large_chat_completion_request",
+                "large_request",
                 endpoint_id=endpoint.id,
                 model=request_data.get("model"),
                 size_mb=round(request_size / 1_000_000, 2),
