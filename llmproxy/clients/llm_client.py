@@ -468,45 +468,11 @@ class LLMClient:
                     yield "data: [DONE]\n\n"
                     return
 
-                # Stream the response - Responses API may have different streaming format
-                async for line in response.aiter_lines():
-                    if line and line.startswith('data: '):
-                        # Skip the [DONE] marker
-                        if line == 'data: [DONE]':
-                            yield line + "\n\n"
-                            continue
-                            
-                        # Try to parse the data to filter out empty events
-                        try:
-                            data_str = line[6:]  # Remove 'data: ' prefix
-                            event_data = json.loads(data_str)
-                            
-                            # For Responses API, we filter based on event types
-                            # Skip events without meaningful content
-                            if 'type' in event_data:
-                                event_type = event_data['type']
-                                
-                                # Skip certain administrative events if needed
-                                if event_type in ['response.start', 'response.end']:
-                                    # These events might be kept for state tracking
-                                    pass
-                                
-                                # For message events, ensure they have content
-                                if event_type == 'message' and 'content' in event_data:
-                                    if not event_data['content']:
-                                        logger.debug("Filtering out message event with empty content")
-                                        continue
-                            
-                            # This event looks good, yield it
-                            yield line + "\n\n"
-                            
-                        except json.JSONDecodeError:
-                            # If we can't parse it, just forward it as-is
-                            logger.debug(f"Could not parse response event, forwarding as-is: {line}")
-                            yield line + "\n\n"
-                    elif line:
-                        # Non-SSE formatted line, forward as-is
-                        yield line + "\n\n"
+                # Stream the response - Forward the raw SSE stream
+                # The httpx response already provides proper SSE formatting
+                async for chunk in response.aiter_raw():
+                    if chunk:
+                        yield chunk.decode('utf-8')
 
         except httpx.TimeoutException:
             logger.error("llm_response_stream_timeout", url=url, timeout=self.timeout)
