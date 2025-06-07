@@ -46,25 +46,20 @@ class CacheManager:
 
     def _should_cache(self, request_data: dict) -> bool:
         """Determine if request should be cached"""
-        # Don't cache streaming requests
-        if request_data.get("stream", False):
-            return False
-        
         # Check for cache control directives
         # Support both direct cache parameter and extra_body.cache
         cache_control = request_data.get("cache")
         if not cache_control:
-            # Check extra_body for cache control
             extra_body = request_data.get("extra_body", {})
             cache_control = extra_body.get("cache")
-        
+
         # If cache control is specified and no-cache is True, don't cache
         if cache_control and cache_control.get("no-cache", False):
             return False
 
         return True
 
-    async def get(self, request_data: dict) -> Optional[dict]:
+    async def get(self, request_data: dict) -> Optional[Any]:
         """Get cached response"""
         if not self._should_cache(request_data):
             return None
@@ -77,7 +72,11 @@ class CacheManager:
             if data:
                 self._hits += 1
                 logger.info("cache_hit", key=key)
-                return json.loads(data)
+                cached = json.loads(data)
+                # Backwards compatibility for old cache format
+                if isinstance(cached, dict) and "data" in cached and "stream" in cached:
+                    return cached
+                return {"stream": False, "data": cached}
 
             self._misses += 1
             logger.debug("cache_miss", key=key)
@@ -87,19 +86,22 @@ class CacheManager:
             logger.error("cache_get_error", error=str(e), key=key)
             return None
 
-    async def set(self, request_data: dict, response_data: dict):
+    async def set(self, request_data: dict, response_data: Any, *, is_streaming: bool = False, metadata: Optional[Dict[str, Any]] = None):
         """Cache response"""
         if not self._should_cache(request_data):
             return
 
-        # Don't cache error responses
-        if "error" in response_data:
+        if not is_streaming and isinstance(response_data, dict) and "error" in response_data:
             return
 
         key = self._generate_cache_key(request_data)
 
+        payload = {"stream": is_streaming, "data": response_data}
+        if metadata:
+            payload["meta"] = metadata
+
         try:
-            await self.redis.setex(key, self.ttl, json.dumps(response_data))
+            await self.redis.setex(key, self.ttl, json.dumps(payload))
             logger.debug("cache_set", key=key, ttl=self.ttl)
 
         except Exception as e:

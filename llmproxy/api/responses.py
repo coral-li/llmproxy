@@ -59,12 +59,11 @@ class ResponseHandler:
         if self.config.general_settings.cache and not is_streaming:
             cached_response = await self.cache_manager.get(request_data)
             if cached_response:
+                data = cached_response.get("data")
                 # Add proxy metadata
-                cached_response["_proxy_cache_hit"] = True
-                cached_response["_proxy_latency_ms"] = int(
-                    (time.time() - start_time) * 1000
-                )
-                return cached_response
+                data["_proxy_cache_hit"] = True
+                data["_proxy_latency_ms"] = int((time.time() - start_time) * 1000)
+                return data
 
         # Execute request with retries
         response = await self._execute_with_failover(model_group, request_data)
@@ -79,7 +78,7 @@ class ResponseHandler:
             and not is_streaming
             and response.get("status_code") == 200
         ):
-            await self.cache_manager.set(request_data, response["data"])
+            await self.cache_manager.set(request_data, response["data"], is_streaming=False)
 
         # Add proxy metadata
         if response.get("data"):

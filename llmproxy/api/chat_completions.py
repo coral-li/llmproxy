@@ -56,23 +56,76 @@ class ChatCompletionHandler:
 
         is_streaming = request_data.get("stream", False)
 
-        # Check cache for non-streaming requests
-        if self.config.general_settings.cache and not is_streaming:
-            cached_response = await self.cache_manager.get(request_data)
-            if cached_response:
-                # Add proxy metadata
-                cached_response["_proxy_cache_hit"] = True
-                cached_response["_proxy_latency_ms"] = int(
-                    (time.time() - start_time) * 1000
-                )
-                return cached_response
+        # Check cache first
+        if self.config.general_settings.cache:
+            cached = await self.cache_manager.get(request_data)
+            if cached:
+                latency_ms = int((time.time() - start_time) * 1000)
+                if is_streaming:
+                    endpoint_base = cached.get("meta", {}).get(
+                        "endpoint_base_url", "https://api.openai.com"
+                    )
+
+                    cached_data = cached.get("data")
+                    if cached.get("stream"):
+                        chunks = cached_data
+                    else:
+                        content = (
+                            cached_data.get("choices", [{}])[0]
+                            .get("message", {})
+                            .get("content", "")
+                        )
+                        model_name = cached_data.get("model", request_data.get("model"))
+                        base_obj = {
+                            "id": cached_data.get("id", "cached"),
+                            "object": "chat.completion.chunk",
+                            "created": cached_data.get("created", int(time.time())),
+                            "model": model_name,
+                        }
+                        chunk_role = json.dumps({**base_obj, "choices": [{"index": 0, "delta": {"role": "assistant"}}]})
+                        chunk_content = json.dumps({**base_obj, "choices": [{"index": 0, "delta": {"content": content}}]})
+                        chunk_end = json.dumps({**base_obj, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+                        chunks = [
+                            f"data: {chunk_role}\n\n",
+                            f"data: {chunk_content}\n\n",
+                            f"data: {chunk_end}\n\n",
+                            "data: [DONE]\n\n",
+                        ]
+
+                    async def stream_cached():
+                        for chunk in chunks:
+                            yield chunk
+                
+                    return StreamingResponse(
+                        stream_cached(),
+                        media_type="text/event-stream",
+                        headers={
+                            "Cache-Control": "no-cache",
+                            "X-Accel-Buffering": "no",
+                            "X-Proxy-Endpoint-Base-Url": endpoint_base,
+                            "X-Proxy-Cache-Hit": "true",
+                            "X-Proxy-Latency-MS": str(latency_ms),
+                        },
+                    )
+                else:
+                    cached_data = cached.get("data")
+                    cached_data["_proxy_cache_hit"] = True
+                    cached_data["_proxy_latency_ms"] = latency_ms
+                    return cached_data
 
         # Execute request with retries
         response = await self._execute_with_failover(model_group, request_data)
 
         # For streaming responses, return immediately
-        if is_streaming and isinstance(response, StreamingResponse):
-            return response
+        if is_streaming and response.get("status_code") == 200 and hasattr(response.get("data"), "__aiter__"):
+            headers = {
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "X-Proxy-Endpoint-Base-Url": response.get("endpoint_base_url", "https://api.openai.com"),
+                "X-Proxy-Cache-Hit": "false",
+                "X-Proxy-Latency-MS": str(int((time.time() - start_time) * 1000)),
+            }
+            return StreamingResponse(response["data"], media_type="text/event-stream", headers=headers)
 
         # Cache successful non-streaming responses
         if (
@@ -80,7 +133,7 @@ class ChatCompletionHandler:
             and not is_streaming
             and response.get("status_code") == 200
         ):
-            await self.cache_manager.set(request_data, response["data"])
+            await self.cache_manager.set(request_data, response["data"], is_streaming=False)
 
         # Add proxy metadata
         if response.get("data"):
@@ -94,12 +147,11 @@ class ChatCompletionHandler:
 
         # Return appropriate response
         if is_streaming:
-            # For streaming, check if it's already a StreamingResponse
-            if isinstance(response, StreamingResponse):
-                return response
-            else:
-                # If not, something went wrong, return error
-                raise HTTPException(500, "Streaming response error")
+            # If we reach here, streaming failed
+            raise HTTPException(
+                status_code=response.get("status_code", 500),
+                detail=response.get("error", "Streaming response error"),
+            )
         else:
             if response["status_code"] == 200:
                 return response["data"]
@@ -147,18 +199,27 @@ class ChatCompletionHandler:
 
                 # Handle streaming differently
                 if is_streaming and response.get("status_code") == 200:
-                    # For streaming, return a streaming response
-                    # Note: For streaming responses, endpoint info is added via headers
-                    streaming_response = StreamingResponse(
-                        response["data"],
-                        media_type="text/event-stream",
-                        headers={
-                            "Cache-Control": "no-cache",
-                            "X-Accel-Buffering": "no",
-                            "X-Proxy-Endpoint-Base-Url": endpoint.params.get("base_url", "https://api.openai.com"),
-                        },
-                    )
-                    return streaming_response
+                    gen = response["data"]
+                    if self.config.general_settings.cache:
+                        async def caching_gen():
+                            chunks = []
+                            async for chunk in gen:
+                                chunks.append(chunk)
+                                yield chunk
+                            await self.cache_manager.set(
+                                request_data,
+                                chunks,
+                                is_streaming=True,
+                                metadata={"endpoint_base_url": endpoint.params.get("base_url", "https://api.openai.com")},
+                            )
+                        gen = caching_gen()
+
+                    return {
+                        "status_code": 200,
+                        "data": gen,
+                        "headers": {},
+                        "endpoint_base_url": endpoint.params.get("base_url", "https://api.openai.com"),
+                    }
 
                 # Check response status
                 if response["status_code"] == 200:
