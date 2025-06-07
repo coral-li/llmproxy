@@ -206,6 +206,7 @@ class ResponseHandler:
 
                 else:
                     # Non-retryable error - still retry with different endpoint
+                    # Don't record failure since it's likely a client error, not endpoint fault
                     logger.warning(
                         "non_retryable_error_retrying",
                         endpoint_id=endpoint.id,
@@ -219,9 +220,6 @@ class ResponseHandler:
                         response_headers=response.get("headers", {}),
                         request_model=request_data.get("model"),
                     )
-
-                    # Mark endpoint as failed and continue to next endpoint
-                    self.load_balancer.record_failure(endpoint, error_msg)
 
                 # Store the last response to return if all endpoints fail
                 last_response = response

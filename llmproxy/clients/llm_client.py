@@ -129,6 +129,59 @@ class LLMClient:
                         **error_details,
                         request_body=data,  # Include full request for 500 errors
                     )
+                # For vague 400 errors, log request details to help debugging
+                elif response.status_code == 400 and error and ("check your inputs" in error.lower() or "invalid_request_error" in error):
+                    # Extract key request details for debugging
+                    debug_details = {
+                        **error_details,
+                        "request_id": response.headers.get("x-request-id"),
+                    }
+                    
+                    # Log prompt/messages content for debugging
+                    if data:
+                        # For chat completions
+                        if "messages" in data:
+                            messages_summary = []
+                            for msg in data.get("messages", [])[:5]:  # First 5 messages
+                                msg_summary = {
+                                    "role": msg.get("role"),
+                                    "content_preview": str(msg.get("content", ""))[:200] + "..." if len(str(msg.get("content", ""))) > 200 else str(msg.get("content", ""))
+                                }
+                                messages_summary.append(msg_summary)
+                            debug_details["messages_preview"] = messages_summary
+                            debug_details["total_messages"] = len(data.get("messages", []))
+                        
+                        # For responses API
+                        if "input" in data:
+                            input_data = data.get("input", [])
+                            if isinstance(input_data, list):
+                                input_summary = []
+                                for inp in input_data[:3]:  # First 3 inputs
+                                    if isinstance(inp, dict):
+                                        inp_summary = {
+                                            "role": inp.get("role"),
+                                            "content_types": [c.get("type") for c in inp.get("content", [])] if isinstance(inp.get("content"), list) else None,
+                                            "content_preview": str(inp)[:200] + "..." if len(str(inp)) > 200 else str(inp)
+                                        }
+                                        input_summary.append(inp_summary)
+                                debug_details["input_preview"] = input_summary
+                                debug_details["total_inputs"] = len(input_data)
+                        
+                        # Log other important parameters
+                        debug_details["parameters"] = {
+                            "temperature": data.get("temperature"),
+                            "max_tokens": data.get("max_tokens"),
+                            "max_output_tokens": data.get("max_output_tokens"),
+                            "max_completion_tokens": data.get("max_completion_tokens"),
+                            "stream": data.get("stream"),
+                            "tools": len(data.get("tools", [])) if "tools" in data else None,
+                            "tool_choice": data.get("tool_choice"),
+                        }
+                    
+                    logger.error(
+                        "llm_request_vague_error",
+                        **debug_details,
+                    )
                 else:
                     logger.error(
                         "llm_request_error",
@@ -221,6 +274,29 @@ class LLMClient:
                             "llm_stream_server_error",
                             **error_details,
                             request_body=data,  # Include full request for 500 errors
+                        )
+                    # For vague 400 errors in streaming
+                    elif response.status_code == 400 and ("check your inputs" in error_text.decode().lower() or "invalid_request_error" in error_text.decode()):
+                        # Add debugging info similar to non-streaming
+                        debug_details = {
+                            **error_details,
+                            "request_id": response.headers.get("x-request-id"),
+                        }
+                        
+                        if data and "messages" in data:
+                            messages_summary = []
+                            for msg in data.get("messages", [])[:5]:
+                                msg_summary = {
+                                    "role": msg.get("role"),
+                                    "content_preview": str(msg.get("content", ""))[:200] + "..." if len(str(msg.get("content", ""))) > 200 else str(msg.get("content", ""))
+                                }
+                                messages_summary.append(msg_summary)
+                            debug_details["messages_preview"] = messages_summary
+                            debug_details["total_messages"] = len(data.get("messages", []))
+                        
+                        logger.error(
+                            "llm_stream_vague_error",
+                            **debug_details,
                         )
                     else:
                         logger.error(
