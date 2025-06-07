@@ -289,6 +289,94 @@ class ProxyTester:
                 "error_message": error_msg
             }
     
+    def test_streaming_caching(self) -> Dict[str, Any]:
+        """Test caching behavior for streaming requests"""
+        self.log("Testing streaming caching behavior...")
+        
+        # Use deterministic request for caching
+        messages = [
+            {"role": "user", "content": "List exactly three colors, one per line."}
+        ]
+        
+        results = []
+        
+        # First streaming request (should miss cache)
+        self.log("  Making first streaming request (expecting cache miss)...")
+        start1 = time.time()
+        try:
+            stream1 = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=True,
+                # Enable streaming cache
+                extra_body={"cache": {"stream-cache": True}},
+            )
+            
+            chunks1 = []
+            for chunk in stream1:
+                if hasattr(chunk.choices[0], 'delta') and hasattr(chunk.choices[0].delta, 'content'):
+                    if chunk.choices[0].delta.content:
+                        chunks1.append(chunk.choices[0].delta.content)
+            
+            duration1 = time.time() - start1
+            content1 = "".join(chunks1)
+            
+            self.log(f"  First request: {content1.strip()} (took {duration1:.2f}s)")
+            results.append({"request": 1, "duration": duration1, "content": content1, "chunks": len(chunks1)})
+            
+        except Exception as e:
+            self.log(f"❌ First streaming request failed: {str(e)}", "ERROR")
+            return {"test": "streaming_caching", "success": False, "error": str(e)}
+        
+        # Small delay to ensure cache is written
+        time.sleep(0.5)
+        
+        # Second streaming request (should hit cache)
+        self.log("  Making second streaming request (expecting cache hit)...")
+        start2 = time.time()
+        try:
+            stream2 = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=True,
+                # Enable streaming cache
+                extra_body={"cache": {"stream-cache": True}},
+            )
+            
+            chunks2 = []
+            for chunk in stream2:
+                if hasattr(chunk.choices[0], 'delta') and hasattr(chunk.choices[0].delta, 'content'):
+                    if chunk.choices[0].delta.content:
+                        chunks2.append(chunk.choices[0].delta.content)
+            
+            duration2 = time.time() - start2
+            content2 = "".join(chunks2)
+            
+            self.log(f"  Second request: {content2.strip()} (took {duration2:.2f}s)")
+            results.append({"request": 2, "duration": duration2, "content": content2, "chunks": len(chunks2)})
+            
+            # Check if content is the same (cached properly)
+            content_matches = content1 == content2
+            
+            # Cache hit should be much faster
+            speedup = duration1 / duration2 if duration2 > 0 else float('inf')
+            cache_worked = duration2 < duration1 * 0.5  # At least 2x faster
+            
+            self.log(f"✅ Streaming caching test complete: {speedup:.1f}x speedup, content matches: {content_matches}")
+            
+            return {
+                "test": "streaming_caching",
+                "success": content_matches and cache_worked,
+                "results": results,
+                "speedup": speedup,
+                "cache_worked": cache_worked,
+                "content_matches": content_matches
+            }
+            
+        except Exception as e:
+            self.log(f"❌ Second streaming request failed: {str(e)}", "ERROR")
+            return {"test": "streaming_caching", "success": False, "error": str(e), "results": results}
+    
     def test_responses_api_basic(self) -> Dict[str, Any]:
         """Test basic responses API (non-streaming)"""
         self.log("Testing responses API basic...")
@@ -587,6 +675,7 @@ class ProxyTester:
             self.test_streaming_raw_http,
             self.test_caching,
             self.test_error_handling,
+            self.test_streaming_caching,
             self.test_responses_api_basic,
             self.test_responses_api_streaming,
             lambda: self.test_load_balancing(5),  # Fewer requests for quick testing
@@ -637,6 +726,11 @@ class ProxyTester:
                 speedup = result.get('speedup', 0)
                 cache_worked = result.get('cache_worked', False)
                 print(f"    └─ Speedup: {speedup:.1f}x, Cache: {'Working' if cache_worked else 'Not working'}")
+            elif test_name == "streaming_caching" and success:
+                speedup = result.get('speedup', 0)
+                cache_worked = result.get('cache_worked', False)
+                content_matches = result.get('content_matches', False)
+                print(f"    └─ Speedup: {speedup:.1f}x, Cache: {'Working' if cache_worked else 'Not working'}, Content matches: {content_matches}")
             elif test_name == "load_balancing" and success:
                 avg_time = result.get('average_time', 0)
                 print(f"    └─ Avg response time: {avg_time:.2f}s")

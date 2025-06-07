@@ -1,6 +1,6 @@
 import hashlib
 import json
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List, AsyncIterator
 import redis.asyncio as redis
 from .logger import get_logger
 
@@ -18,6 +18,8 @@ class CacheManager:
         self.namespace = namespace
         self._hits = 0
         self._misses = 0
+        self._streaming_hits = 0
+        self._streaming_misses = 0
 
     def _generate_cache_key(self, request_data: dict) -> str:
         """Generate cache key from request parameters"""
@@ -44,12 +46,8 @@ class CacheManager:
 
         return f"{self.namespace}:{cache_hash}"
 
-    def _should_cache(self, request_data: dict) -> bool:
+    def _should_cache(self, request_data: dict, ignore_streaming: bool = False) -> bool:
         """Determine if request should be cached"""
-        # Don't cache streaming requests
-        if request_data.get("stream", False):
-            return False
-        
         # Check for cache control directives
         # Support both direct cache parameter and extra_body.cache
         cache_control = request_data.get("cache")
@@ -62,10 +60,17 @@ class CacheManager:
         if cache_control and cache_control.get("no-cache", False):
             return False
 
+        # Don't check streaming if explicitly ignored (for streaming cache implementation)
+        if not ignore_streaming and request_data.get("stream", False):
+            # For backward compatibility, we check if streaming caching is explicitly enabled
+            # via cache control directive
+            if not (cache_control and cache_control.get("stream-cache", False)):
+                return False
+
         return True
 
     async def get(self, request_data: dict) -> Optional[dict]:
-        """Get cached response"""
+        """Get cached response for non-streaming requests"""
         if not self._should_cache(request_data):
             return None
 
@@ -88,7 +93,7 @@ class CacheManager:
             return None
 
     async def set(self, request_data: dict, response_data: dict):
-        """Cache response"""
+        """Cache response for non-streaming requests"""
         if not self._should_cache(request_data):
             return
 
@@ -105,14 +110,111 @@ class CacheManager:
         except Exception as e:
             logger.error("cache_set_error", error=str(e), key=key)
 
+    async def get_streaming(self, request_data: dict) -> Optional[List[str]]:
+        """Get cached streaming response chunks"""
+        if not self._should_cache(request_data, ignore_streaming=True):
+            return None
+
+        key = f"{self._generate_cache_key(request_data)}:stream"
+
+        try:
+            # Get all chunks from Redis list
+            chunks = await self.redis.lrange(key, 0, -1)
+            
+            if chunks:
+                self._streaming_hits += 1
+                logger.info("streaming_cache_hit", key=key, num_chunks=len(chunks))
+                return chunks
+            
+            self._streaming_misses += 1
+            logger.debug("streaming_cache_miss", key=key)
+            return None
+
+        except Exception as e:
+            logger.error("streaming_cache_get_error", error=str(e), key=key)
+            return None
+
+    async def set_streaming_chunk(self, request_data: dict, chunk: str, finalize: bool = False):
+        """Cache a streaming response chunk"""
+        if not self._should_cache(request_data, ignore_streaming=True):
+            return
+
+        key = f"{self._generate_cache_key(request_data)}:stream"
+
+        try:
+            # Push chunk to Redis list
+            await self.redis.rpush(key, chunk)
+            
+            # Set TTL when finalizing (after all chunks are stored)
+            if finalize:
+                await self.redis.expire(key, self.ttl)
+                logger.debug("streaming_cache_finalized", key=key, ttl=self.ttl)
+
+        except Exception as e:
+            logger.error("streaming_cache_set_error", error=str(e), key=key, chunk_preview=chunk[:100])
+
+    async def create_streaming_cache_writer(self, request_data: dict) -> "StreamingCacheWriter":
+        """Create a streaming cache writer that intercepts and caches chunks"""
+        return StreamingCacheWriter(self, request_data)
+
     def get_stats(self) -> Dict[str, int]:
         """Get cache statistics"""
         total = self._hits + self._misses
         hit_rate = (self._hits / total * 100) if total > 0 else 0
+
+        streaming_total = self._streaming_hits + self._streaming_misses
+        streaming_hit_rate = (self._streaming_hits / streaming_total * 100) if streaming_total > 0 else 0
 
         return {
             "hits": self._hits,
             "misses": self._misses,
             "total": total,
             "hit_rate": hit_rate,
+            "streaming_hits": self._streaming_hits,
+            "streaming_misses": self._streaming_misses,
+            "streaming_total": streaming_total,
+            "streaming_hit_rate": streaming_hit_rate,
         }
+
+
+class StreamingCacheWriter:
+    """Helper class to intercept and cache streaming chunks"""
+    
+    def __init__(self, cache_manager: CacheManager, request_data: dict):
+        self.cache_manager = cache_manager
+        self.request_data = request_data
+        self.chunks_written = 0
+        self._error_occurred = False
+    
+    async def write_and_yield(self, chunk: str) -> str:
+        """Write chunk to cache and yield it"""
+        # Don't cache if error occurred
+        if self._error_occurred:
+            return chunk
+            
+        # Check for error in chunk
+        if "data: " in chunk and '"error":' in chunk:
+            self._error_occurred = True
+            logger.debug("streaming_cache_writer_error_detected", chunk_preview=chunk[:100])
+            return chunk
+        
+        # Cache the chunk
+        await self.cache_manager.set_streaming_chunk(self.request_data, chunk)
+        self.chunks_written += 1
+        
+        # If this is the [DONE] marker, finalize the cache
+        if chunk.strip() == "data: [DONE]":
+            await self.cache_manager.set_streaming_chunk(self.request_data, "", finalize=True)
+            logger.info("streaming_cache_writer_finalized", chunks_written=self.chunks_written)
+        
+        return chunk
+    
+    async def intercept_stream(self, stream: AsyncIterator[str]) -> AsyncIterator[str]:
+        """Intercept a stream, cache chunks, and yield them"""
+        try:
+            async for chunk in stream:
+                yield await self.write_and_yield(chunk)
+        except Exception as e:
+            self._error_occurred = True
+            logger.error("streaming_cache_writer_error", error=str(e))
+            raise

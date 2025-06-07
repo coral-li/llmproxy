@@ -8,6 +8,7 @@ A high-performance proxy server for Large Language Models (LLMs) that provides i
 - **Automatic Failover**: Seamlessly switch to backup endpoints when primary endpoints fail
 - **Rate Limit Management**: Track and respect API rate limits to prevent 429 errors
 - **Response Caching**: Cache deterministic responses in Redis for improved performance
+- **Streaming Cache**: Cache and replay streaming responses for faster real-time interactions
 - **OpenAI Compatible**: Drop-in replacement for OpenAI API clients (both Chat Completions and Responses APIs)
 - **Multi-Provider Support**: Works with OpenAI and Azure OpenAI endpoints
 - **Health Monitoring**: Track endpoint health and automatically cooldown failed endpoints
@@ -79,6 +80,38 @@ client = OpenAI(
 response = client.chat.completions.create(
     model="gpt-3.5-turbo",
     messages=[{"role": "user", "content": "Hello!"}]
+)
+```
+
+#### Streaming with Caching
+
+LLMProxy now supports caching for streaming responses, dramatically improving performance for repeated streaming requests:
+
+```python
+# Enable streaming cache for a request
+stream = client.chat.completions.create(
+    model="gpt-3.5-turbo",
+    messages=[{"role": "user", "content": "Tell me a story"}],
+    stream=True,
+    extra_body={"cache": {"stream-cache": True}}  # Enable streaming cache
+)
+
+# The first request will hit the LLM and cache the response
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="")
+
+# Subsequent identical requests will be served from cache
+# with much lower latency while maintaining the streaming experience
+```
+
+You can also disable caching for specific requests:
+
+```python
+# Disable cache for this request
+response = client.chat.completions.create(
+    model="gpt-3.5-turbo",
+    messages=[{"role": "user", "content": "What's the weather?"}],
+    extra_body={"cache": {"no-cache": True}}  # Bypass cache
 )
 ```
 
@@ -180,11 +213,21 @@ python test_proxy_live.py --proxy-url http://localhost:8080
 Tests include:
 - Basic chat completions
 - Streaming responses
-- Caching behavior
+- Caching behavior (including streaming cache)
 - Error handling
 - Load balancing
 - Concurrent requests
 - Health and stats endpoints
+
+### Testing Streaming Cache
+
+Run the streaming cache demo:
+
+```bash
+python demo_streaming_cache.py
+```
+
+This demonstrates how streaming responses are cached and replayed with dramatically reduced latency.
 
 ## Development
 
@@ -203,4 +246,4 @@ flake8 llmproxy/
 
 ## License
 
-MIT License - see LICENSE file for details 
+MIT License - see LICENSE file for details
