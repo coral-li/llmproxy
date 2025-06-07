@@ -54,7 +54,7 @@ class LLMClient:
 
         # Detect Azure OpenAI endpoints
         is_azure = (
-            "azure.com" in endpoint_url
+            endpoint_url.endswith("azure.com")
         )
 
         if is_azure:

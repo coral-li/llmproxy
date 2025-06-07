@@ -289,6 +289,105 @@ class ProxyTester:
                 "error_message": error_msg
             }
     
+    def test_responses_api_basic(self) -> Dict[str, Any]:
+        """Test basic responses API (non-streaming)"""
+        self.log("Testing responses API basic...")
+        
+        start_time = time.time()
+        try:
+            response = self.client.responses.create(
+                model=self.model,
+                instructions="You are a helpful assistant. Be very concise.",
+                input="What is 2+2? Reply with just the number and nothing else.",
+                extra_body={"cache": {"no-cache": True}},
+            )
+            
+            duration = time.time() - start_time
+            output = response.output_text
+            
+            self.log(f"✅ Responses API success: {output} (took {duration:.2f}s)")
+            
+            return {
+                "test": "responses_api_basic",
+                "success": True,
+                "duration": duration,
+                "output": output
+            }
+            
+        except Exception as e:
+            self.log(f"❌ Responses API failed: {str(e)}", "ERROR")
+            return {
+                "test": "responses_api_basic",
+                "success": False,
+                "error": str(e)
+            }
+    
+    def test_responses_api_streaming(self) -> Dict[str, Any]:
+        """Test responses API streaming"""
+        self.log("Testing responses API streaming...")
+        
+        start_time = time.time()
+        try:
+            self.log("Creating responses API streaming request...")
+            stream = self.client.responses.create(
+                model=self.model,
+                instructions="You are a helpful assistant.",
+                input="Count from 1 to 5, one number at a time.",
+                stream=True,
+                extra_body={"cache": {"no-cache": True}},
+            )
+                        
+            chunks = []
+            chunk_count = 0
+            for event in stream:
+                chunk_count += 1
+                if hasattr(event, 'type') and event.type == "response.output_text.delta":
+                    if hasattr(event, 'delta') and event.delta:
+                        chunks.append(event.delta)
+            
+            self.log(f"Responses API stream iteration completed. Total events processed: {chunk_count}")
+            
+            duration = time.time() - start_time
+            full_response = "".join(chunks)
+            
+            # Check if we received the expected content (numbers 1-5)
+            has_all_numbers = all(str(i) in full_response for i in range(1, 6))
+            
+            # We should have received at least one chunk with content
+            min_chunks_required = 1
+            success = len(chunks) >= min_chunks_required and has_all_numbers
+            
+            if success:
+                self.log(f"✅ Responses API streaming success: {len(chunks)} chunks received with all numbers 1-5 (took {duration:.2f}s)")
+            else:
+                if not has_all_numbers:
+                    missing_numbers = [str(i) for i in range(1, 6) if str(i) not in full_response]
+                    self.log(f"❌ Responses API streaming failed: Missing numbers {missing_numbers} in response")
+                else:
+                    self.log(f"❌ Responses API streaming failed: Only {len(chunks)} chunks received, expected at least {min_chunks_required}")
+            
+            self.log(f"   Response: {full_response}")
+            
+            return {
+                "test": "responses_api_streaming",
+                "success": success,
+                "duration": duration,
+                "chunks": len(chunks),
+                "response": full_response,
+                "has_all_numbers": has_all_numbers,
+                "min_chunks_required": min_chunks_required
+            }
+            
+        except Exception as e:
+            import traceback
+            self.log(f"❌ Responses API streaming failed with exception: {str(e)}", "ERROR")
+            self.log(f"Traceback: {traceback.format_exc()}", "ERROR")
+            return {
+                "test": "responses_api_streaming",
+                "success": False,
+                "error": str(e)
+            }
+    
     def test_load_balancing(self, num_requests: int = 10) -> Dict[str, Any]:
         """Test load balancing by making multiple requests"""
         self.log(f"Testing load balancing with {num_requests} requests...")
@@ -419,6 +518,65 @@ class ProxyTester:
                 "stats": stats_data
             }
     
+    async def test_responses_api_async(self) -> Dict[str, Any]:
+        """Test responses API with AsyncOpenAI client (like the simple_streaming_test.py example)"""
+        self.log("Testing responses API with AsyncOpenAI...")
+        
+        from openai import AsyncOpenAI
+        
+        async_client = AsyncOpenAI(base_url=self.base_url)
+        
+        start_time = time.time()
+        try:
+            # Test non-streaming first
+            self.log("  Testing async non-streaming...")
+            response = await async_client.responses.create(
+                model=self.model,
+                instructions="You are a helpful assistant. Be very concise.",
+                input="What is the capital of France? Reply with just the city name.",
+            )
+            
+            output = response.output_text
+            self.log(f"  Non-streaming result: {output}")
+            
+            # Test streaming
+            self.log("  Testing async streaming...")
+            stream = await async_client.responses.create(
+                model=self.model,
+                input="Write a one-sentence bedtime story about a unicorn.",
+                stream=True,
+            )
+            
+            chunks = []
+            async for event in stream:
+                if event.type == "response.output_text.delta":
+                    chunks.append(event.delta)
+            
+            streaming_output = "".join(chunks)
+            duration = time.time() - start_time
+            
+            self.log(f"✅ Async responses API success (took {duration:.2f}s)")
+            self.log(f"  Streaming result: {streaming_output}")
+            
+            return {
+                "test": "responses_api_async",
+                "success": True,
+                "duration": duration,
+                "non_streaming_output": output,
+                "streaming_output": streaming_output,
+                "streaming_chunks": len(chunks)
+            }
+            
+        except Exception as e:
+            import traceback
+            self.log(f"❌ Async responses API failed: {str(e)}", "ERROR")
+            self.log(f"Traceback: {traceback.format_exc()}", "ERROR")
+            return {
+                "test": "responses_api_async",
+                "success": False,
+                "error": str(e)
+            }
+    
     def run_all_tests(self):
         """Run all tests"""
         self.log("=== Starting LLMProxy Live Tests ===\n")
@@ -429,6 +587,8 @@ class ProxyTester:
             self.test_streaming_raw_http,
             self.test_caching,
             self.test_error_handling,
+            self.test_responses_api_basic,
+            self.test_responses_api_streaming,
             lambda: self.test_load_balancing(5),  # Fewer requests for quick testing
         ]
         
@@ -445,6 +605,9 @@ class ProxyTester:
             
             health_stats_result = await self.check_health_and_stats()
             self.results.append(health_stats_result)
+            
+            responses_api_async_result = await self.test_responses_api_async()
+            self.results.append(responses_api_async_result)
         
         asyncio.run(run_async_tests())
         
@@ -481,6 +644,12 @@ class ProxyTester:
                 successful = result.get('successful', 0)
                 total_concurrent = result.get('num_concurrent', 0)
                 print(f"    └─ Successful: {successful}/{total_concurrent}")
+            elif test_name == "responses_api_streaming" and success:
+                chunks = result.get('chunks', 0)
+                print(f"    └─ Streaming chunks: {chunks}")
+            elif test_name == "responses_api_async" and success:
+                chunks = result.get('streaming_chunks', 0)
+                print(f"    └─ Async streaming chunks: {chunks}")
         
         print("\n" + "="*50)
 
@@ -530,6 +699,13 @@ def main():
         # Test raw HTTP streaming
         raw_streaming_result = tester.test_streaming_raw_http()
         tester.results.append(raw_streaming_result)
+        
+        # Test responses API
+        responses_result = tester.test_responses_api_basic()
+        tester.results.append(responses_result)
+        
+        responses_streaming_result = tester.test_responses_api_streaming()
+        tester.results.append(responses_streaming_result)
         
         tester.print_summary()
     else:
