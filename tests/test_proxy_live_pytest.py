@@ -16,8 +16,7 @@ from dotenv import load_dotenv
 
 # Add the project root to Python path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from llmproxy.config.utils import get_proxy_url, get_proxy_base_url
-from test_proxy_config import get_configured_model
+from llmproxy.config.utils import get_proxy_url
 
 load_dotenv()
 

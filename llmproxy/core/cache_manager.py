@@ -64,15 +64,14 @@ class CacheManager:
             "input": request_data.get("input"),
             # Responses API specific fields
             "instructions": request_data.get("instructions"),
-            # Note: We intentionally exclude previous_response_id and metadata 
-            # as they would make caching context-dependent
-            "temperature": request_data.get("temperature", 1.0),
+            "previous_response_id": request_data.get("previous_response_id"),
+            "temperature": request_data.get("temperature"),
             "max_tokens": request_data.get("max_tokens"),
             "max_output_tokens": request_data.get("max_output_tokens"),
             "max_completion_tokens": request_data.get("max_completion_tokens"),
-            "top_p": request_data.get("top_p", 1.0),
-            "frequency_penalty": request_data.get("frequency_penalty", 0),
-            "presence_penalty": request_data.get("presence_penalty", 0),
+            "top_p": request_data.get("top_p"),
+            "frequency_penalty": request_data.get("frequency_penalty"),
+            "presence_penalty": request_data.get("presence_penalty"),
             "tools": request_data.get("tools"),
             "tool_choice": request_data.get("tool_choice"),
             "seed": request_data.get("seed"),
