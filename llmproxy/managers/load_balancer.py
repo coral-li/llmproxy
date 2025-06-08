@@ -10,129 +10,139 @@ import sys
 from llmproxy.models.endpoint import Endpoint, EndpointStatus
 from llmproxy.config_model import LLMProxyConfig, ModelGroup
 from llmproxy.core.logger import get_logger
+from llmproxy.managers.endpoint_state_manager import EndpointStateManager
 
 logger = get_logger(__name__)
 
 
 class LoadBalancer:
-    """Manages endpoint pools and implements weighted round-robin with health checks"""
+    """Stateless load balancer that uses Redis as single source of truth"""
 
-    def __init__(self, cooldown_time: int = 60, allowed_fails: int = 1):
+    def __init__(self, cooldown_time: int = 60, allowed_fails: int = 1, state_manager: Optional[EndpointStateManager] = None):
         self.cooldown_time = cooldown_time
         self.allowed_fails = allowed_fails
-        self.endpoint_pools: Dict[str, List[Endpoint]] = {}
+        self.endpoint_configs: Dict[str, List[Endpoint]] = {}  # Just config, no state
+        self.state_manager = state_manager
         self._lock = asyncio.Lock()
 
+    def set_state_manager(self, state_manager: EndpointStateManager):
+        """Set the endpoint state manager after initialization"""
+        self.state_manager = state_manager
+
     async def initialize_from_config(self, config: LLMProxyConfig):
-        """Initialize endpoint pools from configuration"""
+        """Initialize endpoint configurations and set up Redis state"""
         for model_group in config.model_groups:
-            pool = []
+            configs = []
 
             for model_config in model_group.models:
+                # Create endpoint config (stateless)
                 endpoint = Endpoint(
                     model=model_config.model,
                     weight=model_config.weight,
                     params=model_config.params,
                     allowed_fails=config.general_settings.allowed_fails,
                 )
-                pool.append(endpoint)
+                
+                # Initialize state in Redis
+                if self.state_manager:
+                    await self.state_manager.initialize_endpoint(endpoint, model_group.model_group)
+                
+                configs.append(endpoint)
 
                 logger.info(
-                    "endpoint_added",
+                    "endpoint_configured",
                     model_group=model_group.model_group,
                     model=model_config.model,
+                    endpoint_id=endpoint.id,
                     weight=model_config.weight,
                     base_url=endpoint.base_url,
                 )
 
-            self.endpoint_pools[model_group.model_group] = pool
+            self.endpoint_configs[model_group.model_group] = configs
 
         logger.info(
             "load_balancer_initialized",
-            model_groups=list(self.endpoint_pools.keys()),
-            total_endpoints=sum(len(pool) for pool in self.endpoint_pools.values()),
+            model_groups=list(self.endpoint_configs.keys()),
+            total_endpoints=sum(len(pool) for pool in self.endpoint_configs.values()),
         )
 
     async def select_endpoint(self, model_group: str) -> Optional[Endpoint]:
-        """Select an endpoint using weighted round-robin with health checks"""
+        """Select an endpoint using weighted round-robin with health checks from Redis"""
         async with self._lock:
-            pool = self.endpoint_pools.get(model_group, [])
+            configs = self.endpoint_configs.get(model_group, [])
 
-            if not pool:
+            if not configs:
                 logger.error("no_endpoints_configured", model_group=model_group)
                 return None
 
-            # Log current state of all endpoints
-            logger.info(
-                "selecting_endpoint",
-                model_group=model_group,
-                endpoints=[
-                    {
-                        "id": ep.id,
-                        "base_url": ep.base_url,
-                        "weight": ep.weight,
-                        "status": ep.status.value,
-                        "is_available": ep.is_available(),
-                        "consecutive_failures": ep.consecutive_failures,
-                    }
-                    for ep in pool
-                ]
-            )
-
-            # First, try endpoints with weight > 0
+            # Check availability from Redis for each endpoint
+            available_endpoints = []
             primary_available = []
-            for ep in pool:
-                if ep.weight == 0:  # Skip weight=0 endpoints in primary pass
-                    continue
-                    
-                if not ep.is_available():
-                    continue
+            fallback_available = []
+            
+            for endpoint_config in configs:
+                is_available = True
+                if self.state_manager:
+                    is_available = await self.state_manager.is_endpoint_available(endpoint_config.id)
+                
+                if is_available:
+                    if endpoint_config.weight > 0:
+                        primary_available.append(endpoint_config)
+                    else:
+                        fallback_available.append(endpoint_config)
 
-                primary_available.append(ep)
+            # Log current state from Redis
+            if self.state_manager:
+                endpoint_states = []
+                for config in configs:
+                    state = await self.state_manager.get_endpoint_state(config.id)
+                    endpoint_states.append({
+                        "id": config.id,
+                        "base_url": config.base_url,
+                        "weight": config.weight,
+                        "status": state.get("status", "unknown") if state else "unknown",
+                        "is_available": await self.state_manager.is_endpoint_available(config.id),
+                        "consecutive_failures": state.get("consecutive_failures", 0) if state else 0,
+                    })
+                
+                logger.info(
+                    "selecting_endpoint",
+                    model_group=model_group,
+                    endpoints=endpoint_states
+                )
 
             # Use primary endpoints if available
             if primary_available:
-                available = primary_available
+                available_endpoints = primary_available
             else:
                 # All primary endpoints are down, try weight=0 fallbacks
                 logger.warning(
                     "all_primary_endpoints_unavailable", model_group=model_group
                 )
+                available_endpoints = fallback_available
 
-                fallbacks = [ep for ep in pool if ep.weight == 0 and ep.is_available()]
-                logger.info(
-                    "fallback_endpoints_found",
-                    model_group=model_group,
-                    num_fallbacks=len(fallbacks),
-                    fallback_ids=[ep.id for ep in fallbacks],
-                    fallback_base_urls=[ep.base_url for ep in fallbacks],
-                    fallback_statuses=[ep.status.value for ep in fallbacks]
-                )
-                
-                available = fallbacks
-
-            if not available:
+            if not available_endpoints:
                 logger.error("no_available_endpoints", model_group=model_group)
                 return None
 
             # Weighted random selection
-            total_weight = sum(ep.weight for ep in available)
+            total_weight = sum(ep.weight for ep in available_endpoints)
 
             # If all weights are 0 (all fallbacks), do uniform random
             if total_weight == 0:
-                selected = random.choice(available)
+                selected = random.choice(available_endpoints)
             else:
                 # Weighted random selection
                 rand = random.uniform(0, total_weight)
                 cumulative = 0
 
-                for endpoint in available:
+                for endpoint in available_endpoints:
                     cumulative += endpoint.weight
                     if rand <= cumulative:
                         selected = endpoint
                         break
                 else:
-                    selected = available[-1]
+                    selected = available_endpoints[-1]
 
             logger.info(
                 "endpoint_selected",
@@ -146,32 +156,63 @@ class LoadBalancer:
             return selected
 
     def record_success(self, endpoint: Endpoint):
-        """Record successful request for an endpoint"""
-        endpoint.record_success()
+        """Record successful request for an endpoint (in Redis)"""
         logger.debug(
             "endpoint_success",
             endpoint_id=endpoint.id,
-            consecutive_failures=endpoint.consecutive_failures,
         )
+        
+        # Record in Redis
+        if self.state_manager:
+            asyncio.create_task(self.state_manager.record_request_outcome(
+                endpoint.id, 
+                success=True, 
+                allowed_fails=self.allowed_fails, 
+                cooldown_time=self.cooldown_time
+            ))
 
     def record_failure(self, endpoint: Endpoint, error: str):
-        """Record failed request for an endpoint"""
-        endpoint.record_failure(error, self.cooldown_time)
+        """Record failed request for an endpoint (in Redis)"""
         logger.warning(
             "endpoint_failure",
             endpoint_id=endpoint.id,
             error=error,
-            consecutive_failures=endpoint.consecutive_failures,
-            status=endpoint.status.value,
         )
+        
+        # Record in Redis
+        if self.state_manager:
+            asyncio.create_task(self.state_manager.record_request_outcome(
+                endpoint.id, 
+                success=False, 
+                error=error,
+                allowed_fails=self.allowed_fails, 
+                cooldown_time=self.cooldown_time
+            ))
 
-    def get_all_endpoints_stats(self) -> Dict[str, List[Dict]]:
-        """Get statistics for all endpoints"""
+    async def get_all_endpoints_stats(self) -> Dict[str, List[Dict]]:
+        """Get statistics for all endpoints (directly from Redis)"""
         stats = {}
-        for model_group, endpoints in self.endpoint_pools.items():
-            stats[model_group] = [ep.get_stats() for ep in endpoints]
+        
+        if not self.state_manager:
+            # Return basic config if no state manager
+            for model_group, configs in self.endpoint_configs.items():
+                stats[model_group] = [config.get_config_dict() for config in configs]
+            return stats
+        
+        for model_group, configs in self.endpoint_configs.items():
+            endpoint_stats = []
+            for config in configs:
+                # Get fresh stats from Redis
+                stat_data = await self.state_manager.get_endpoint_stats(config.id)
+                endpoint_stats.append(stat_data)
+            stats[model_group] = endpoint_stats
+            
         return stats
 
     def get_model_groups(self) -> List[str]:
         """Get list of configured model groups"""
-        return list(self.endpoint_pools.keys())
+        return list(self.endpoint_configs.keys())
+
+    async def shutdown(self):
+        """Clean shutdown"""
+        logger.info("load_balancer_shutdown_complete")

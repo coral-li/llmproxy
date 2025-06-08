@@ -1,7 +1,8 @@
 from enum import Enum
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
-import uuid
+import hashlib
+import json
 
 
 class EndpointStatus(Enum):
@@ -13,28 +14,17 @@ class EndpointStatus(Enum):
 
 
 class Endpoint:
-    """Represents an LLM endpoint with health tracking"""
+    """Represents an LLM endpoint configuration (stateless)"""
 
     def __init__(self, model: str, weight: int, params: dict, allowed_fails: int = 1):
-        self.id = str(uuid.uuid4())
+        # Generate deterministic ID based on model and key params
+        self.id = self._generate_deterministic_id(model, params)
         self.model = model
         self.weight = weight
         self.params = params
         self.allowed_fails = allowed_fails
 
-        # Health tracking
-        self.status = EndpointStatus.HEALTHY
-        self.consecutive_failures = 0
-        self.cooldown_until: Optional[datetime] = None
-
-        # Statistics
-        self.total_requests = 0
-        self.failed_requests = 0
-        self.last_error: Optional[str] = None
-        self.last_error_time: Optional[datetime] = None
-        self.last_success_time: Optional[datetime] = None
-
-        # Extract key info for logging
+        # Extract key info for logging (config only, no state)
         self.base_url = params.get("base_url", "openai")
         self.is_azure = (
             "azure" in self.base_url.lower()
@@ -42,70 +32,33 @@ class Endpoint:
             else False
         )
 
-    def record_success(self):
-        """Record successful request"""
-        self.total_requests += 1
-        self.consecutive_failures = 0
-        self.status = EndpointStatus.HEALTHY
-        self.last_success_time = datetime.utcnow()
+    def _generate_deterministic_id(self, model: str, params: dict) -> str:
+        """Generate a deterministic ID based on model and key parameters"""
+        # Include key identifying params but exclude API keys for security
+        id_data = {
+            "model": model,
+            "base_url": params.get("base_url", "openai"),
+            "deployment": params.get("deployment"),  # Azure deployment name
+            "api_version": params.get("api_version"),  # Azure API version
+        }
+        
+        # Remove None values
+        id_data = {k: v for k, v in id_data.items() if v is not None}
+        
+        # Create deterministic hash
+        id_str = json.dumps(id_data, sort_keys=True)
+        return hashlib.sha256(id_str.encode()).hexdigest()[:16]
 
-    def record_failure(self, error: str, cooldown_time: int = 60):
-        """Record failed request and update status"""
-        self.total_requests += 1
-        self.failed_requests += 1
-        self.consecutive_failures += 1
-        self.last_error = error
-        self.last_error_time = datetime.utcnow()
-
-        # Check if we should enter cooldown
-        if self.consecutive_failures >= self.allowed_fails:
-            self.status = EndpointStatus.COOLING_DOWN
-            self.cooldown_until = datetime.utcnow() + timedelta(seconds=cooldown_time)
-
-    def is_available(self) -> bool:
-        """Check if endpoint is available for requests"""
-        if self.status == EndpointStatus.HEALTHY:
-            return True
-
-        if self.status == EndpointStatus.COOLING_DOWN:
-            if datetime.utcnow() > self.cooldown_until:
-                # Exit cooldown
-                self.status = EndpointStatus.HEALTHY
-                self.consecutive_failures = 0
-                return True
-
-        return False
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get endpoint statistics"""
-        success_rate = 0
-        if self.total_requests > 0:
-            success_rate = (
-                (self.total_requests - self.failed_requests) / self.total_requests * 100
-            )
-
+    def get_config_dict(self) -> Dict[str, Any]:
+        """Get endpoint configuration (no state, just config)"""
         return {
             "id": self.id,
             "model": self.model,
             "weight": self.weight,
-            "status": self.status.value,
             "base_url": self.base_url,
             "is_azure": self.is_azure,
-            "total_requests": self.total_requests,
-            "failed_requests": self.failed_requests,
-            "success_rate": success_rate,
-            "consecutive_failures": self.consecutive_failures,
-            "last_error": self.last_error,
-            "last_error_time": self.last_error_time.isoformat()
-            if self.last_error_time
-            else None,
-            "last_success_time": self.last_success_time.isoformat()
-            if self.last_success_time
-            else None,
-            "cooldown_until": self.cooldown_until.isoformat()
-            if self.cooldown_until
-            else None,
+            "allowed_fails": self.allowed_fails,
         }
 
     def __repr__(self):
-        return f"<Endpoint {self.model} {self.base_url} status={self.status.value}>"
+        return f"<Endpoint {self.model} {self.base_url}>"

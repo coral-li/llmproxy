@@ -3,6 +3,7 @@
 
 import os
 import sys
+import signal
 import argparse
 from pathlib import Path
 from dotenv import load_dotenv
@@ -55,15 +56,18 @@ def main():
         print(f"Starting LLMProxy on {host}:{port}")
         print(f"Configuration loaded from: {args.config or 'llmproxy.yaml'}")
         
-        # Import the FastAPI app
-        from llmproxy.main import app
-        
-        # Start the server
+        # Start the server with proper signal handling
+        # Using module string instead of importing app directly
+        # This allows uvicorn to properly handle signals
         uvicorn.run(
-            app,
+            "llmproxy.main:app",
             host=host,
             port=port,
-            log_level=args.log_level.lower()
+            log_level=args.log_level.lower(),
+            access_log=False,
+            server_header=False,
+            use_colors=True,
+            reload=False
         )
         
     except FileNotFoundError as e:

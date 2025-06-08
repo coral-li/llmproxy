@@ -19,6 +19,14 @@ class ModelGroup(BaseModel):
     }
 
 
+class RedisConfig(BaseModel):
+    """Redis configuration"""
+    host: str
+    port: Union[int, str]
+    password: str = ""
+    db: int = 0
+
+
 class CacheParams(BaseModel):
     """Cache configuration parameters"""
     type: str = "redis"
@@ -47,6 +55,16 @@ class LLMProxyConfig(BaseModel):
     """Root configuration model for LLM Proxy"""
     model_groups: List[ModelGroup]
     general_settings: GeneralSettings
+    
+    @property
+    def redis(self) -> RedisConfig:
+        """Get Redis configuration from general settings"""
+        return RedisConfig(
+            host=self.general_settings.redis_host,
+            port=self.general_settings.redis_port,
+            password=self.general_settings.redis_password,
+            db=0
+        )
     
     model_config = {
         'protected_namespaces': (),  # Disable protected namespace warning
