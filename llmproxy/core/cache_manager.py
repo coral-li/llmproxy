@@ -42,11 +42,13 @@ class CacheManager:
     """Manages LLM response caching with intelligent key generation"""
 
     def __init__(
-        self, redis_client: redis.Redis, ttl: int = 604800, namespace: str = "llmproxy"
+        self, redis_client: redis.Redis, ttl: int = 604800, namespace: str = "llmproxy", 
+        cache_enabled: bool = True
     ):
         self.redis = redis_client
         self.ttl = ttl
         self.namespace = namespace
+        self.cache_enabled = cache_enabled  # Global cache setting from config
         self._hits = 0
         self._misses = 0
         self._streaming_hits = 0
@@ -115,7 +117,8 @@ class CacheManager:
             cache_control=cache_control,
             ignore_streaming=ignore_streaming,
             is_streaming=request_data.get("stream", False),
-            has_extra_body="extra_body" in request_data
+            has_extra_body="extra_body" in request_data,
+            global_cache_enabled=self.cache_enabled
         )
         
         # If cache control is specified and no-cache is True, don't cache
@@ -123,16 +126,13 @@ class CacheManager:
             logger.debug("should_cache_result", result=False, reason="no-cache directive")
             return False
 
-        # Don't check streaming if explicitly ignored (for streaming cache implementation)
-        if not ignore_streaming and request_data.get("stream", False):
-            # For backward compatibility, we check if streaming caching is explicitly enabled
-            # via cache control directive
-            stream_cache_enabled = cache_control and cache_control.get("stream-cache", False)
-            logger.debug("should_cache_result", result=stream_cache_enabled, reason="streaming requires explicit stream-cache")
-            if not stream_cache_enabled:
-                return False
+        # If no cache directive is specified, use global setting
+        if not cache_control:
+            logger.debug("should_cache_result", result=self.cache_enabled, reason="global cache setting")
+            return self.cache_enabled
 
-        logger.debug("should_cache_result", result=True, reason="default allow")
+        # If cache control is specified but no-cache is not set, allow caching
+        logger.debug("should_cache_result", result=True, reason="cache control specified without no-cache")
         return True
 
     async def get(self, request_data: dict) -> Optional[dict]:

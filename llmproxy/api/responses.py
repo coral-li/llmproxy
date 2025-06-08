@@ -56,17 +56,9 @@ class ResponseHandler:
         is_streaming = request_data.get("stream", False)
 
         # Check cache for streaming requests
-        if self.config.general_settings.cache and is_streaming:
-            # Check if caching is explicitly disabled via stream-cache: False
-            cache_control = request_data.get("cache")
-            if not cache_control:
-                extra_body = request_data.get("extra_body", {})
-                cache_control = extra_body.get("cache", {})
-            
-            # If stream-cache is explicitly False, skip cache lookup
-            stream_cache_disabled = cache_control and cache_control.get("stream-cache", True) is False
-            
-            if not stream_cache_disabled:
+        if is_streaming:
+            # Use harmonized cache logic - check if caching should be used
+            if self.cache_manager._should_cache(request_data):
                 cached_chunks = await self.cache_manager.get_streaming(request_data)
                 if cached_chunks:
                     # Create a streaming response from cached chunks
@@ -99,7 +91,7 @@ class ResponseHandler:
                     )
 
         # Check cache for non-streaming requests
-        if self.config.general_settings.cache and not is_streaming:
+        if not is_streaming and self.cache_manager._should_cache(request_data):
             cached_response = await self.cache_manager.get(request_data)
             if cached_response:
                 # Add proxy metadata
@@ -118,9 +110,9 @@ class ResponseHandler:
 
         # Cache successful non-streaming responses
         if (
-            self.config.general_settings.cache
-            and not is_streaming
+            not is_streaming
             and response.get("status_code") == 200
+            and self.cache_manager._should_cache(request_data)
         ):
             await self.cache_manager.set(request_data, response["data"])
 
@@ -189,27 +181,17 @@ class ResponseHandler:
 
                 # Handle streaming differently
                 if is_streaming and response.get("status_code") == 200:
-                    # Check if caching is enabled for this request
+                    # Check if caching is enabled for this request using harmonized logic
                     should_cache = self.cache_manager._should_cache(request_data, ignore_streaming=True)
-                    
-                    # Additional check for stream-cache specifically
-                    cache_control = request_data.get("cache")
-                    if not cache_control:
-                        extra_body = request_data.get("extra_body", {})
-                        cache_control = extra_body.get("cache", {})
-                    
-                    # If stream-cache is explicitly False, don't cache
-                    if cache_control and cache_control.get("stream-cache", True) is False:
-                        should_cache = False
                     
                     logger.debug(
                         "streaming_response_cache_check",
                         should_cache=should_cache,
-                        cache_enabled=self.config.general_settings.cache,
+                        cache_enabled=self.cache_manager.cache_enabled,
                         request_has_cache_control="cache" in request_data or ("extra_body" in request_data and "cache" in request_data.get("extra_body", {}))
                     )
                     
-                    if self.config.general_settings.cache and should_cache:
+                    if should_cache:
                         # Create a caching interceptor
                         logger.debug("creating_streaming_cache_writer")
                         cache_writer = await self.cache_manager.create_streaming_cache_writer(request_data)
@@ -234,7 +216,7 @@ class ResponseHandler:
                         logger.debug("returning_cached_streaming_response")
                     else:
                         # Return streaming response without caching
-                        logger.debug("returning_non_cached_streaming_response", reason="cache_disabled" if not self.config.general_settings.cache else "should_cache_false")
+                        logger.debug("returning_non_cached_streaming_response", reason="cache_disabled" if not self.cache_manager.cache_enabled else "should_cache_false")
                         streaming_response = StreamingResponse(
                             response["data"],
                             media_type="text/event-stream",

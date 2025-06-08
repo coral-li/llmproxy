@@ -338,8 +338,8 @@ class ProxyTester:
                 model=self.model,
                 messages=messages,
                 stream=True,
-                # Enable streaming cache
-                extra_body={"cache": {"stream-cache": True}},
+                # Allow caching (relies on global setting)
+                extra_body={"cache": {}},
             )
             
             chunks1 = []
@@ -369,8 +369,8 @@ class ProxyTester:
                 model=self.model,
                 messages=messages,
                 stream=True,
-                # Enable streaming cache
-                extra_body={"cache": {"stream-cache": True}},
+                # Allow caching (relies on global setting)
+                extra_body={"cache": {}},
             )
             
             chunks2 = []
@@ -527,8 +527,8 @@ class ProxyTester:
                 instructions=instructions,
                 input=input_text,
                 stream=True,
-                # Enable streaming cache
-                extra_body={"cache": {"stream-cache": True}},
+                # Allow caching (relies on global setting)
+                extra_body={"cache": {}},
             )
             
             chunks1 = []
@@ -559,8 +559,8 @@ class ProxyTester:
                 instructions=instructions,
                 input=input_text,
                 stream=True,
-                # Enable streaming cache
-                extra_body={"cache": {"stream-cache": True}},
+                # Allow caching (relies on global setting)
+                extra_body={"cache": {}},
             )
             
             chunks2 = []

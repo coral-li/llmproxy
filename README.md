@@ -85,24 +85,7 @@ response = client.chat.completions.create(
 
 #### Streaming with Caching
 
-LLMProxy now supports caching for streaming responses, dramatically improving performance for repeated streaming requests:
-
-```python
-# Enable streaming cache for a request
-stream = client.chat.completions.create(
-    model="gpt-3.5-turbo",
-    messages=[{"role": "user", "content": "Tell me a story"}],
-    stream=True,
-    extra_body={"cache": {"stream-cache": True}}  # Enable streaming cache
-)
-
-# The first request will hit the LLM and cache the response
-for chunk in stream:
-    print(chunk.choices[0].delta.content or "", end="")
-
-# Subsequent identical requests will be served from cache
-# with much lower latency while maintaining the streaming experience
-```
+LLMProxy now supports caching for streaming responses, dramatically improving performance for repeated streaming requests.
 
 You can also disable caching for specific requests:
 
@@ -137,27 +120,7 @@ print(response.output_text)
 
 ##### Streaming with Caching (Responses API)
 
-The Responses API now also supports caching for streaming responses:
-
-```python
-# Enable streaming cache for a responses API request
-stream = client.responses.create(
-    model="gpt-4.1",
-    input=[{"role": "user", "content": "Tell me a story"}],
-    stream=True,
-    extra_body={"cache": {"stream-cache": True}}  # Enable streaming cache
-)
-
-# Process the stream
-for event in stream:
-    if event.type == "message":
-        for content in event.content:
-            if content.type == "output_text":
-                print(content.text, end="")
-
-# Subsequent identical requests will be served from cache
-# with much lower latency while maintaining the streaming experience
-```
+The Responses API now also supports caching for streaming responses.
 
 You can also disable caching for specific requests:
 
@@ -216,19 +179,6 @@ LLMProxy uses:
 - **Pydantic** for configuration validation
 
 ## Testing
-
-### Quick Start for Testing
-
-```bash
-# Start test environment (Redis + Proxy with test config)
-./start_test_environment.sh
-
-# In another terminal, run the demo (no API keys needed)
-python test_proxy_demo.py
-
-# Or run live tests (requires configured endpoints)
-python test_proxy_live.py
-```
 
 ### Running Live Tests
 

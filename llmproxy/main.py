@@ -79,7 +79,8 @@ async def lifespan(app: FastAPI):
             namespace = "llmproxy"
 
         cache_manager = CacheManager(
-            redis_manager.get_client(), ttl=ttl, namespace=namespace
+            redis_manager.get_client(), ttl=ttl, namespace=namespace,
+            cache_enabled=config.general_settings.cache
         )
 
         # LLM client
