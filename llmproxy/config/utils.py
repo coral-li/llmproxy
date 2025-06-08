@@ -4,8 +4,7 @@ import os
 from pathlib import Path
 import sys
 
-# Add parent directory to path to import config_loader
-sys.path.append(str(Path(__file__).parent.parent.parent))
+# Imports are handled properly through package structure
 from llmproxy.config.config_loader import load_config
 
 

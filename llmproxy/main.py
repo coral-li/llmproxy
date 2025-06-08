@@ -7,8 +7,7 @@ from pathlib import Path
 import sys
 from dotenv import load_dotenv
 
-# Add parent to path for imports
-sys.path.append(str(Path(__file__).parent.parent))
+# Imports are handled properly through package structure
 
 from llmproxy.config.config_loader import load_config
 from llmproxy.managers.load_balancer import LoadBalancer

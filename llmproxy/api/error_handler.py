@@ -4,10 +4,9 @@ from typing import Optional, Callable, Any, TypeVar
 from pathlib import Path
 import sys
 
-# Add parent to path for imports
-sys.path.append(str(Path(__file__).parent.parent))
+# Imports are handled properly through package structure
 
-from core.logger import get_logger
+from llmproxy.core.logger import get_logger
 
 logger = get_logger(__name__)
 

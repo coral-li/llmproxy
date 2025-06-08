@@ -5,16 +5,15 @@ import time
 from pathlib import Path
 import sys
 
-# Add parent to path for imports
-sys.path.append(str(Path(__file__).parent.parent))
+# Imports are handled properly through package structure
 
-from managers.load_balancer import LoadBalancer
-from core.cache_manager import CacheManager
-from clients.llm_client import LLMClient
-from models.endpoint import Endpoint
-from api.error_handler import APIError, RateLimitError, is_retryable_error
-from config_model import LLMProxyConfig
-from core.logger import get_logger
+from llmproxy.managers.load_balancer import LoadBalancer
+from llmproxy.core.cache_manager import CacheManager
+from llmproxy.clients.llm_client import LLMClient
+from llmproxy.models.endpoint import Endpoint
+from llmproxy.api.error_handler import APIError, RateLimitError, is_retryable_error
+from llmproxy.config_model import LLMProxyConfig
+from llmproxy.core.logger import get_logger
 
 logger = get_logger(__name__)
 
