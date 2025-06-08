@@ -67,7 +67,6 @@ general_settings:
   cache_params:        # set cache params for redis
     type: redis
     ttl: 604800 # 7 days
-    namespace: "litellm.cache"
     host: os.environ/REDIS_HOST
     port: os.environ/REDIS_PORT
     password: os.environ/REDIS_PASSWORD 

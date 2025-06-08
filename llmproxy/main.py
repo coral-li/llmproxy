@@ -12,7 +12,6 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from llmproxy.config.config_loader import load_config
 from llmproxy.managers.load_balancer import LoadBalancer
-from llmproxy.managers.rate_limit_manager import RateLimitManager
 from llmproxy.core.cache_manager import CacheManager
 from llmproxy.core.redis_manager import RedisManager
 from llmproxy.core.logger import get_logger, setup_logging
@@ -27,7 +26,6 @@ logger = get_logger(__name__)
 # Global instances
 config = None
 load_balancer = None
-rate_limit_manager = None
 cache_manager = None
 llm_client = None
 redis_manager = None
@@ -38,7 +36,7 @@ response_handler = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle"""
-    global config, load_balancer, rate_limit_manager, cache_manager, llm_client, redis_manager, chat_handler, response_handler
+    global config, load_balancer, cache_manager, llm_client, redis_manager, chat_handler, response_handler
 
     try:
         # Load environment variables from .env file
@@ -65,10 +63,6 @@ async def lifespan(app: FastAPI):
             allowed_fails=config.general_settings.allowed_fails,
         )
 
-        # Rate limit manager
-        rate_limit_manager = RateLimitManager(redis_manager.get_client())
-        load_balancer.set_rate_limit_manager(rate_limit_manager)
-
         # Cache manager
         cache_params = config.general_settings.cache_params
         if cache_params:
@@ -92,7 +86,6 @@ async def lifespan(app: FastAPI):
         # Create chat handler
         chat_handler = ChatCompletionHandler(
             load_balancer=load_balancer,
-            rate_limit_manager=rate_limit_manager,
             cache_manager=cache_manager,
             llm_client=llm_client,
             config=config,
@@ -101,7 +94,6 @@ async def lifespan(app: FastAPI):
         # Create response handler
         response_handler = ResponseHandler(
             load_balancer=load_balancer,
-            rate_limit_manager=rate_limit_manager,
             cache_manager=cache_manager,
             llm_client=llm_client,
             config=config,

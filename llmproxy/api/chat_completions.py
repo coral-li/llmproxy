@@ -9,7 +9,6 @@ import sys
 sys.path.append(str(Path(__file__).parent.parent))
 
 from managers.load_balancer import LoadBalancer
-from managers.rate_limit_manager import RateLimitManager
 from core.cache_manager import CacheManager
 from clients.llm_client import LLMClient
 from models.endpoint import Endpoint
@@ -26,13 +25,11 @@ class ChatCompletionHandler:
     def __init__(
         self,
         load_balancer: LoadBalancer,
-        rate_limit_manager: RateLimitManager,
         cache_manager: CacheManager,
         llm_client: LLMClient,
         config: LLMProxyConfig,
     ):
         self.load_balancer = load_balancer
-        self.rate_limit_manager = rate_limit_manager
         self.cache_manager = cache_manager
         self.llm_client = llm_client
         self.config = config
@@ -217,11 +214,6 @@ class ChatCompletionHandler:
                     # Success!
                     self.load_balancer.record_success(endpoint)
 
-                    # Update rate limits
-                    await self.rate_limit_manager.update_from_headers(
-                        endpoint.id, response["headers"]
-                    )
-
                     # Add endpoint information to response
                     response["endpoint_base_url"] = endpoint.params.get("base_url", "https://api.openai.com")
 
@@ -231,7 +223,7 @@ class ChatCompletionHandler:
                 error_msg = response.get("error", "Unknown error")
 
                 # Check if error is retryable
-                if is_retryable_error(response["status_code"], error_msg):
+                if is_retryable_error(response["status_code"]):
                     # Record failure and continue to next endpoint
                     self.load_balancer.record_failure(endpoint, error_msg)
 
@@ -306,9 +298,6 @@ class ChatCompletionHandler:
         self, endpoint: Endpoint, request_data: dict, is_streaming: bool
     ) -> dict:
         """Make request to a specific endpoint"""
-
-        # Pre-emptively consume rate limit capacity
-        await self.rate_limit_manager.consume_capacity(endpoint.id)
 
         # Extract endpoint parameters
         api_key = endpoint.params.get("api_key")

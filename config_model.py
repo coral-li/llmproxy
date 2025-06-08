@@ -23,7 +23,7 @@ class CacheParams(BaseModel):
     """Cache configuration parameters"""
     type: str = "redis"
     ttl: int = 604800  # 7 days default
-    namespace: str = "litellm.cache"
+    namespace: str = "llmproxy.cache"
     host: str
     port: Union[int, str]
     password: str

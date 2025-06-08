@@ -10,7 +10,6 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from models.endpoint import Endpoint, EndpointStatus
 from config_model import LLMProxyConfig, ModelGroup
-from managers.rate_limit_manager import RateLimitManager
 from core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -24,11 +23,6 @@ class LoadBalancer:
         self.allowed_fails = allowed_fails
         self.endpoint_pools: Dict[str, List[Endpoint]] = {}
         self._lock = asyncio.Lock()
-        self.rate_limit_manager: Optional[RateLimitManager] = None
-
-    def set_rate_limit_manager(self, manager: RateLimitManager):
-        """Set the rate limit manager instance"""
-        self.rate_limit_manager = manager
 
     async def initialize_from_config(self, config: LLMProxyConfig):
         """Initialize endpoint pools from configuration"""
@@ -69,48 +63,54 @@ class LoadBalancer:
                 logger.error("no_endpoints_configured", model_group=model_group)
                 return None
 
-            # Filter available endpoints
-            available = []
+            # Log current state of all endpoints
+            logger.info(
+                "selecting_endpoint",
+                model_group=model_group,
+                endpoints=[
+                    {
+                        "id": ep.id,
+                        "base_url": ep.base_url,
+                        "weight": ep.weight,
+                        "status": ep.status.value,
+                        "is_available": ep.is_available(),
+                        "consecutive_failures": ep.consecutive_failures,
+                    }
+                    for ep in pool
+                ]
+            )
+
+            # First, try endpoints with weight > 0
+            primary_available = []
             for ep in pool:
+                if ep.weight == 0:  # Skip weight=0 endpoints in primary pass
+                    continue
+                    
                 if not ep.is_available():
                     continue
 
-                # Check rate limits if manager is available
-                if self.rate_limit_manager:
-                    (
-                        is_available,
-                        wait_time,
-                    ) = await self.rate_limit_manager.check_availability(ep.id)
-                    if not is_available:
-                        logger.debug(
-                            "endpoint_rate_limited",
-                            endpoint_id=ep.id,
-                            wait_time=wait_time,
-                        )
-                        continue
+                primary_available.append(ep)
 
-                available.append(ep)
-
-            if not available:
-                # All endpoints are down or rate limited, try weight=0 fallbacks
+            # Use primary endpoints if available
+            if primary_available:
+                available = primary_available
+            else:
+                # All primary endpoints are down, try weight=0 fallbacks
                 logger.warning(
                     "all_primary_endpoints_unavailable", model_group=model_group
                 )
 
                 fallbacks = [ep for ep in pool if ep.weight == 0 and ep.is_available()]
-                if self.rate_limit_manager:
-                    # Check rate limits for fallbacks too
-                    available_fallbacks = []
-                    for ep in fallbacks:
-                        (
-                            is_available,
-                            _,
-                        ) = await self.rate_limit_manager.check_availability(ep.id)
-                        if is_available:
-                            available_fallbacks.append(ep)
-                    available = available_fallbacks
-                else:
-                    available = fallbacks
+                logger.info(
+                    "fallback_endpoints_found",
+                    model_group=model_group,
+                    num_fallbacks=len(fallbacks),
+                    fallback_ids=[ep.id for ep in fallbacks],
+                    fallback_base_urls=[ep.base_url for ep in fallbacks],
+                    fallback_statuses=[ep.status.value for ep in fallbacks]
+                )
+                
+                available = fallbacks
 
             if not available:
                 logger.error("no_available_endpoints", model_group=model_group)
