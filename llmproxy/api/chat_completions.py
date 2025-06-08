@@ -211,7 +211,7 @@ class ChatCompletionHandler:
                 # Check response status
                 if response["status_code"] == 200:
                     # Success!
-                    self.load_balancer.record_success(endpoint)
+                    await self.load_balancer.record_success(endpoint)
 
                     # Add endpoint information to response
                     response["endpoint_base_url"] = endpoint.params.get("base_url", "https://api.openai.com")
@@ -224,7 +224,7 @@ class ChatCompletionHandler:
                 # Check if error is retryable
                 if is_retryable_error(response["status_code"]):
                     # Record failure and continue to next endpoint
-                    self.load_balancer.record_failure(endpoint, error_msg)
+                    await self.load_balancer.record_failure(endpoint, error_msg)
 
                     logger.warning(
                         "retryable_error",
@@ -258,7 +258,7 @@ class ChatCompletionHandler:
             except Exception as e:
                 logger.error("request_exception", endpoint_id=endpoint.id, error=str(e))
 
-                self.load_balancer.record_failure(endpoint, str(e))
+                await self.load_balancer.record_failure(endpoint, str(e))
 
                 # For streaming, return error in SSE format
                 if is_streaming:

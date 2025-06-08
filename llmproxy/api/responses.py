@@ -229,7 +229,7 @@ class ResponseHandler:
                 # Check response status
                 if response["status_code"] == 200:
                     # Success!
-                    self.load_balancer.record_success(endpoint)
+                    await self.load_balancer.record_success(endpoint)
 
                     # Add endpoint information to response
                     response["endpoint_base_url"] = endpoint.params.get("base_url", "https://api.openai.com")
@@ -242,7 +242,7 @@ class ResponseHandler:
                 if response["status_code"] == 429:
                     # Rate limit hit
                     logger.warning("rate_limit_hit", endpoint_id=endpoint.id)
-                    self.load_balancer.record_failure(endpoint, "Rate limit exceeded")
+                    await self.load_balancer.record_failure(endpoint, "Rate limit exceeded")
 
                 elif is_retryable_error(response["status_code"]):
                     # Retryable error
@@ -260,7 +260,7 @@ class ResponseHandler:
                         request_model=request_data.get("model"),
                     )
 
-                    self.load_balancer.record_failure(endpoint, error_msg)
+                    await self.load_balancer.record_failure(endpoint, error_msg)
 
                 else:
                     # Non-retryable error - still retry with different endpoint
@@ -285,7 +285,7 @@ class ResponseHandler:
             except Exception as e:
                 logger.error("request_exception", endpoint_id=endpoint.id, error=str(e))
 
-                self.load_balancer.record_failure(endpoint, str(e))
+                await self.load_balancer.record_failure(endpoint, str(e))
 
                 # For streaming, return error in SSE format
                 if is_streaming:

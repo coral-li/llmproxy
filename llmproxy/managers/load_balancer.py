@@ -155,23 +155,24 @@ class LoadBalancer:
 
             return selected
 
-    def record_success(self, endpoint: Endpoint):
+    async def record_success(self, endpoint: Endpoint):
         """Record successful request for an endpoint (in Redis)"""
         logger.debug(
             "endpoint_success",
             endpoint_id=endpoint.id,
         )
         
-        # Record in Redis
+        # Ensure endpoint has proper state first
         if self.state_manager:
-            asyncio.create_task(self.state_manager.record_request_outcome(
+            await self.state_manager.ensure_endpoint_state(endpoint, self._get_model_group_for_endpoint(endpoint))
+            await self.state_manager.record_request_outcome(
                 endpoint.id, 
                 success=True, 
                 allowed_fails=self.allowed_fails, 
                 cooldown_time=self.cooldown_time
-            ))
+            )
 
-    def record_failure(self, endpoint: Endpoint, error: str):
+    async def record_failure(self, endpoint: Endpoint, error: str):
         """Record failed request for an endpoint (in Redis)"""
         logger.warning(
             "endpoint_failure",
@@ -179,15 +180,24 @@ class LoadBalancer:
             error=error,
         )
         
-        # Record in Redis
+        # Ensure endpoint has proper state first
         if self.state_manager:
-            asyncio.create_task(self.state_manager.record_request_outcome(
+            await self.state_manager.ensure_endpoint_state(endpoint, self._get_model_group_for_endpoint(endpoint))
+            await self.state_manager.record_request_outcome(
                 endpoint.id, 
                 success=False, 
                 error=error,
                 allowed_fails=self.allowed_fails, 
                 cooldown_time=self.cooldown_time
-            ))
+            )
+
+    def _get_model_group_for_endpoint(self, endpoint: Endpoint) -> str:
+        """Find the model group for a given endpoint"""
+        for model_group, configs in self.endpoint_configs.items():
+            for config in configs:
+                if config.id == endpoint.id:
+                    return model_group
+        return "unknown"
 
     async def get_all_endpoints_stats(self) -> Dict[str, List[Dict]]:
         """Get statistics for all endpoints (directly from Redis)"""

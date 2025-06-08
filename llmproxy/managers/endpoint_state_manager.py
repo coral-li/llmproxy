@@ -81,10 +81,28 @@ class EndpointStateManager:
             # Get current state
             current_data = await self.redis.get(key)
             if not current_data:
-                logger.warning("endpoint_state_not_found_for_request", endpoint_id=endpoint_id)
-                return
-                
-            state_data = json.loads(current_data)
+                logger.info("endpoint_state_missing_for_request_creating_default", endpoint_id=endpoint_id)
+                # Create a minimal default state if endpoint state is missing
+                state_data = {
+                    "id": endpoint_id,
+                    "model": "unknown",
+                    "weight": 1,
+                    "base_url": "unknown", 
+                    "is_azure": False,
+                    "allowed_fails": allowed_fails,
+                    "status": "healthy",
+                    "total_requests": 0,
+                    "failed_requests": 0,
+                    "consecutive_failures": 0,
+                    "last_error": None,
+                    "last_error_time": None,
+                    "last_success_time": None,
+                    "cooldown_until": None,
+                    "created_at": datetime.utcnow().isoformat(),
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+            else:
+                state_data = json.loads(current_data)
             
             # Update counters
             state_data["total_requests"] = state_data.get("total_requests", 0) + 1
@@ -304,4 +322,43 @@ class EndpointStateManager:
 
         except Exception as e:
             logger.error("state_manager_health_check_failed", error=str(e))
-            return False 
+            return False
+
+    async def ensure_endpoint_state(self, endpoint: Endpoint, model_group: str) -> None:
+        """Ensure endpoint has proper state, creating or updating as needed"""
+        try:
+            key = self._get_endpoint_key(endpoint.id)
+            
+            # Get current state
+            current_data = await self.redis.get(key)
+            if not current_data:
+                # No state exists, initialize fully
+                await self.initialize_endpoint(endpoint, model_group)
+                return
+            
+            state_data = json.loads(current_data)
+            
+            # Check if this is a minimal default state (missing proper endpoint info)
+            if (state_data.get("model") == "unknown" or 
+                state_data.get("base_url") == "unknown"):
+                
+                logger.info("upgrading_minimal_endpoint_state", endpoint_id=endpoint.id)
+                
+                # Preserve counters and status but update endpoint info
+                state_data.update({
+                    "model": endpoint.model,
+                    "weight": endpoint.weight,
+                    "base_url": endpoint.base_url,
+                    "is_azure": endpoint.is_azure,
+                    "allowed_fails": endpoint.allowed_fails,
+                    "updated_at": datetime.utcnow().isoformat(),
+                })
+                
+                # Save updated state
+                await self.redis.setex(key, self.state_ttl, json.dumps(state_data))
+                await self.register_endpoint_in_group(model_group, endpoint.id)
+                
+                logger.info("endpoint_state_upgraded", endpoint_id=endpoint.id, model_group=model_group)
+
+        except Exception as e:
+            logger.error("endpoint_state_ensure_failed", endpoint_id=endpoint.id, error=str(e)) 
