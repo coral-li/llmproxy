@@ -5,12 +5,11 @@ import asyncio
 from pathlib import Path
 import sys
 
-# Add parent to path for imports
-sys.path.append(str(Path(__file__).parent.parent))
+# Imports are handled properly through package structure
 
-from models.endpoint import Endpoint, EndpointStatus
-from config_model import LLMProxyConfig, ModelGroup
-from core.logger import get_logger
+from llmproxy.models.endpoint import Endpoint, EndpointStatus
+from llmproxy.config_model import LLMProxyConfig, ModelGroup
+from llmproxy.core.logger import get_logger
 
 logger = get_logger(__name__)
 

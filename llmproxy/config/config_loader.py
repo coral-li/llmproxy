@@ -2,11 +2,8 @@ import yaml
 import os
 from typing import Any, Dict, List, Union
 from pathlib import Path
-import sys
 
-# Add parent directory to path to import config_model
-sys.path.append(str(Path(__file__).parent.parent.parent))
-from config_model import LLMProxyConfig
+from llmproxy.config_model import LLMProxyConfig
 
 
 def resolve_env_vars(data: Any) -> Any:
@@ -42,22 +39,25 @@ def resolve_env_vars(data: Any) -> Any:
     return resolved_data
 
 
-def load_config() -> LLMProxyConfig:
+def load_config(config_path: str = None) -> LLMProxyConfig:
     """
     Load and validate YAML configuration using the Pydantic model
 
     Args:
-        yaml_file_path: Path to the YAML configuration file
+        config_path: Path to the YAML configuration file. If not provided,
+                    looks for 'llmproxy.yaml' in the current working directory.
 
     Returns:
         Validated LLMProxyConfig instance
     """
-    yaml_file_path = "llmproxy.yaml"
+    if config_path is None:
+        config_path = os.path.join(os.getcwd(), "llmproxy.yaml")
+    
     # Check if file exists
-    if not os.path.exists(yaml_file_path):
-        raise FileNotFoundError(f"Configuration file not found: {yaml_file_path}")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
-    with open(yaml_file_path, "r") as file:
+    with open(config_path, "r") as file:
         yaml_data = yaml.safe_load(file)
 
     # Replace environment variable references with actual values

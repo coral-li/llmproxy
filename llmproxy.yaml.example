@@ -1,0 +1,66 @@
+# LLMProxy Configuration Example
+# Copy this file to llmproxy.yaml and customize for your setup
+
+model_groups:
+  # Example model group for GPT-4 mini
+  - model_group: gpt-4o-mini
+    models:
+      # Azure OpenAI endpoint 1
+      - model: gpt-4o-mini
+        weight: 1
+        params:
+          api_key: os.environ/AZURE_OPENAI_API_KEY_O4_MINI_1
+          base_url: os.environ/AZURE_OPENAI_ENDPOINT_O4_MINI_1
+          api_version: "2024-02-15-preview"
+      
+      # Azure OpenAI endpoint 2 (backup)
+      - model: gpt-4o-mini
+        weight: 1
+        params:
+          api_key: os.environ/AZURE_OPENAI_API_KEY_O4_MINI_2
+          base_url: os.environ/AZURE_OPENAI_ENDPOINT_O4_MINI_2
+          api_version: "2024-02-15-preview"
+      
+      # OpenAI fallback (weight 0 = only used when others fail)
+      - model: gpt-4o-mini
+        weight: 0
+        params:
+          api_key: os.environ/OPENAI_API_KEY
+          base_url: https://api.openai.com
+
+  # Example model group for GPT-4
+  - model_group: gpt-4
+    models:
+      - model: gpt-4
+        weight: 1
+        params:
+          api_key: os.environ/AZURE_OPENAI_API_KEY_GPT_4_1
+          base_url: os.environ/AZURE_OPENAI_ENDPOINT_GPT_4_1
+          api_version: "2024-02-15-preview"
+      
+      - model: gpt-4
+        weight: 0
+        params:
+          api_key: os.environ/OPENAI_API_KEY
+          base_url: https://api.openai.com
+
+general_settings:
+  bind_address: localhost
+  bind_port: 4000
+  num_retries: 3 # number of retries for each request
+  allowed_fails: 1 # number of allowed fails for each endpoint
+  cooldown_time: 60 # cooldown time for each endpoint
+
+  # Redis will be used to store the cache and the state of the endpoints
+  redis_host: os.environ/REDIS_HOST
+  redis_port: os.environ/REDIS_PORT
+  redis_password: os.environ/REDIS_PASSWORD
+
+  cache: True # enable cache
+  cache_params:        # set cache params for redis
+    type: redis
+    ttl: 604800 # 7 days
+    namespace: "llmproxy.cache"
+    host: os.environ/REDIS_HOST
+    port: os.environ/REDIS_PORT
+    password: os.environ/REDIS_PASSWORD 

@@ -24,9 +24,23 @@ A high-performance proxy server for Large Language Models (LLMs) that provides i
 
 ### Installation
 
+#### Option 1: Install from GitHub (Recommended)
+
+```bash
+# Install directly from GitHub
+pip install git+https://github.com/yourusername/llmproxy.git
+
+# Or install in development mode
+git clone https://github.com/yourusername/llmproxy.git
+cd llmproxy
+pip install -e .
+```
+
+#### Option 2: Local Development Setup
+
 1. Clone the repository:
 ```bash
-git clone <repository-url>
+git clone https://github.com/yourusername/llmproxy.git
 cd llmproxy
 ```
 
@@ -35,7 +49,15 @@ cd llmproxy
 pip install -r requirements.txt
 ```
 
-3. Set up environment variables:
+### Configuration
+
+1. Create your configuration file:
+```bash
+# Copy the example configuration
+cp llmproxy.yaml.example llmproxy.yaml
+```
+
+2. Set up environment variables:
 
 **Option A: For testing (no real API keys needed)**
 ```bash
@@ -48,13 +70,27 @@ cp env.example .env
 # Edit .env with your API keys and configuration
 ```
 
-4. Start Redis (if not already running):
+3. Edit `llmproxy.yaml` with your specific configuration (API keys, endpoints, etc.)
+
+### Running
+
+1. Start Redis (if not already running):
 ```bash
 redis-server
 ```
 
-5. Run the proxy:
+2. Run the proxy:
 ```bash
+# If installed via pip
+llmproxy
+
+# Or with custom config
+llmproxy --config /path/to/your/llmproxy.yaml
+
+# Or with custom host/port
+llmproxy --host 0.0.0.0 --port 8080
+
+# For development setup
 python run_proxy.py
 ```
 

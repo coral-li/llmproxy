@@ -1,0 +1,15 @@
+include README.md
+include requirements.txt
+recursive-include llmproxy *.py
+exclude llmproxy.yaml
+exclude llmproxy.test.yaml
+exclude run_proxy.py
+exclude config_model.py
+exclude test_proxy_config.py
+exclude playground.ipynb
+exclude clear_cache.sh
+recursive-exclude tests *
+recursive-exclude docs *
+recursive-exclude .git *
+recursive-exclude __pycache__ *
+recursive-exclude *.pyc * 
