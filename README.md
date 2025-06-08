@@ -219,7 +219,20 @@ This demonstrates how streaming responses are cached and replayed with dramatica
 ### Running Unit Tests
 
 ```bash
-pytest llmproxy/tests/
+# Run tests (automatically runs in parallel with -n auto)
+pytest
+
+# Run tests serially (disable parallel execution)
+pytest -n 0
+
+# Run tests in parallel with specific number of workers
+pytest -n 4
+
+# For debugging cache-related issues, run serially
+pytest tests/test_proxy_live_pytest.py -n 0 -v
+
+# Run all tests except caching tests in parallel (default behavior)
+pytest -k "not (caching or cache)"
 ```
 
 ### Code Formatting

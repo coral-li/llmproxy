@@ -23,6 +23,7 @@ structlog
 pytest
 pytest-asyncio
 pytest-mock
+pytest-xdist
 
 # Development
 black
