@@ -1,3 +1,8 @@
+# TODO
 
+## Completed
+- [x] Caching for streaming (Chat Completions API)
+- [x] Caching for streaming (Responses API)
 
-- [] Caching for streaming
+## In Progress
+- [ ] Additional features as needed

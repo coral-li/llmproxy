@@ -135,6 +135,41 @@ response = client.responses.create(
 print(response.output_text)
 ```
 
+##### Streaming with Caching (Responses API)
+
+The Responses API now also supports caching for streaming responses:
+
+```python
+# Enable streaming cache for a responses API request
+stream = client.responses.create(
+    model="gpt-4.1",
+    input=[{"role": "user", "content": "Tell me a story"}],
+    stream=True,
+    extra_body={"cache": {"stream-cache": True}}  # Enable streaming cache
+)
+
+# Process the stream
+for event in stream:
+    if event.type == "message":
+        for content in event.content:
+            if content.type == "output_text":
+                print(content.text, end="")
+
+# Subsequent identical requests will be served from cache
+# with much lower latency while maintaining the streaming experience
+```
+
+You can also disable caching for specific requests:
+
+```python
+# Disable cache for this request
+response = client.responses.create(
+    model="gpt-4.1",
+    input=[{"role": "user", "content": "What's the weather?"}],
+    extra_body={"cache": {"no-cache": True}}  # Bypass cache
+)
+```
+
 ### Configuration
 
 Edit `llmproxy.yaml` to configure:

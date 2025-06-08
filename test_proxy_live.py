@@ -508,6 +508,97 @@ class ProxyTester:
                 "error": str(e)
             }
     
+    def test_responses_api_streaming_cache(self) -> Dict[str, Any]:
+        """Test caching behavior for responses API streaming requests"""
+        self.log("Testing responses API streaming caching behavior...")
+        
+        # Use deterministic request for caching
+        instructions = "You are a helpful assistant. Be concise and predictable."
+        input_text = "List exactly three primary colors, one per line."
+        
+        results = []
+        
+        # First streaming request (should miss cache)
+        self.log("  Making first responses API streaming request (expecting cache miss)...")
+        start1 = time.time()
+        try:
+            stream1 = self.client.responses.create(
+                model=self.model,
+                instructions=instructions,
+                input=input_text,
+                stream=True,
+                # Enable streaming cache
+                extra_body={"cache": {"stream-cache": True}},
+            )
+            
+            chunks1 = []
+            for event in stream1:
+                if hasattr(event, 'type') and event.type == "response.output_text.delta":
+                    if hasattr(event, 'delta') and event.delta:
+                        chunks1.append(event.delta)
+            
+            duration1 = time.time() - start1
+            content1 = "".join(chunks1)
+            
+            self.log(f"  First request: {content1.strip()[:50]}... (took {duration1:.2f}s)")
+            results.append({"request": 1, "duration": duration1, "content": content1, "chunks": len(chunks1)})
+            
+        except Exception as e:
+            self.log(f"❌ First responses API streaming request failed: {str(e)}", "ERROR")
+            return {"test": "responses_api_streaming_cache", "success": False, "error": str(e)}
+        
+        # Small delay to ensure cache is written
+        time.sleep(0.5)
+        
+        # Second streaming request (should hit cache)
+        self.log("  Making second responses API streaming request (expecting cache hit)...")
+        start2 = time.time()
+        try:
+            stream2 = self.client.responses.create(
+                model=self.model,
+                instructions=instructions,
+                input=input_text,
+                stream=True,
+                # Enable streaming cache
+                extra_body={"cache": {"stream-cache": True}},
+            )
+            
+            chunks2 = []
+            for event in stream2:
+                if hasattr(event, 'type') and event.type == "response.output_text.delta":
+                    if hasattr(event, 'delta') and event.delta:
+                        chunks2.append(event.delta)
+            
+            duration2 = time.time() - start2
+            content2 = "".join(chunks2)
+            
+            self.log(f"  Second request: {content2.strip()[:50]}... (took {duration2:.2f}s)")
+            results.append({"request": 2, "duration": duration2, "content": content2, "chunks": len(chunks2)})
+            
+            # Check if content is similar (may have slight variations in formatting)
+            # For responses API, content might not be exactly identical due to message IDs etc
+            content_similar = content1.strip().lower() == content2.strip().lower() or \
+                             all(color in content2.lower() for color in ["red", "blue", "yellow", "green"])
+            
+            # Cache hit should be much faster
+            speedup = duration1 / duration2 if duration2 > 0 else float('inf')
+            cache_worked = duration2 < duration1 * 0.5  # At least 2x faster
+            
+            self.log(f"✅ Responses API streaming caching test complete: {speedup:.1f}x speedup, content similar: {content_similar}")
+            
+            return {
+                "test": "responses_api_streaming_cache",
+                "success": content_similar and cache_worked,
+                "results": results,
+                "speedup": speedup,
+                "cache_worked": cache_worked,
+                "content_similar": content_similar
+            }
+            
+        except Exception as e:
+            self.log(f"❌ Second responses API streaming request failed: {str(e)}", "ERROR")
+            return {"test": "responses_api_streaming_cache", "success": False, "error": str(e), "results": results}
+    
     def test_load_balancing(self, num_requests: int = 10) -> Dict[str, Any]:
         """Test load balancing by making multiple requests"""
         self.log(f"Testing load balancing with {num_requests} requests...")
@@ -714,6 +805,7 @@ class ProxyTester:
             self.test_streaming_caching,
             self.test_responses_api_basic,
             self.test_responses_api_streaming,
+            self.test_responses_api_streaming_cache,
             lambda: self.test_load_balancing(5),  # Fewer requests for quick testing
         ]
         
@@ -777,6 +869,11 @@ class ProxyTester:
             elif test_name == "responses_api_streaming" and success:
                 chunks = result.get('chunks', 0)
                 print(f"    └─ Streaming chunks: {chunks}")
+            elif test_name == "responses_api_streaming_cache" and success:
+                speedup = result.get('speedup', 0)
+                cache_worked = result.get('cache_worked', False)
+                content_similar = result.get('content_similar', False)
+                print(f"    └─ Speedup: {speedup:.1f}x, Cache: {'Working' if cache_worked else 'Not working'}, Content similar: {content_similar}")
             elif test_name == "responses_api_async" and success:
                 chunks = result.get('streaming_chunks', 0)
                 print(f"    └─ Async streaming chunks: {chunks}")
@@ -841,6 +938,9 @@ def main():
         
         responses_streaming_result = tester.test_responses_api_streaming()
         tester.results.append(responses_streaming_result)
+        
+        responses_streaming_cache_result = tester.test_responses_api_streaming_cache()
+        tester.results.append(responses_streaming_cache_result)
         
         tester.print_summary()
     else:

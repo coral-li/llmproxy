@@ -3,8 +3,39 @@ import json
 from typing import Optional, Any, Dict, List, AsyncIterator
 import redis.asyncio as redis
 from .logger import get_logger
+import time
+import uuid
 
 logger = get_logger(__name__)
+
+
+class EventAwareChunk:
+    """Represents a normalized chunk for caching that abstracts API differences"""
+    def __init__(self, event_type: Optional[str] = None, data_type: Optional[str] = None, 
+                 content: Optional[str] = None, metadata: Optional[dict] = None):
+        self.event_type = event_type  # For responses API: response.created, response.output_text.delta, etc.
+        self.data_type = data_type    # For responses API: message, reasoning, etc.
+        self.content = content         # The actual content text
+        self.metadata = metadata or {} # Additional fields that should be preserved
+    
+    def to_dict(self) -> dict:
+        """Convert to dictionary for storage"""
+        return {
+            "event_type": self.event_type,
+            "data_type": self.data_type,
+            "content": self.content,
+            "metadata": self.metadata
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "EventAwareChunk":
+        """Create from dictionary"""
+        return cls(
+            event_type=data.get("event_type"),
+            data_type=data.get("data_type"),
+            content=data.get("content"),
+            metadata=data.get("metadata", {})
+        )
 
 
 class CacheManager:
@@ -26,9 +57,17 @@ class CacheManager:
         # Extract relevant fields for caching
         cache_data = {
             "model": request_data.get("model"),
+            # Handle both chat completions (messages) and responses API (input)
             "messages": request_data.get("messages"),
+            "input": request_data.get("input"),
+            # Responses API specific fields
+            "instructions": request_data.get("instructions"),
+            # Note: We intentionally exclude previous_response_id and metadata 
+            # as they would make caching context-dependent
             "temperature": request_data.get("temperature", 1.0),
             "max_tokens": request_data.get("max_tokens"),
+            "max_output_tokens": request_data.get("max_output_tokens"),
+            "max_completion_tokens": request_data.get("max_completion_tokens"),
             "top_p": request_data.get("top_p", 1.0),
             "frequency_penalty": request_data.get("frequency_penalty", 0),
             "presence_penalty": request_data.get("presence_penalty", 0),
@@ -43,8 +82,23 @@ class CacheManager:
         # Create deterministic hash
         cache_str = json.dumps(cache_data, sort_keys=True)
         cache_hash = hashlib.sha256(cache_str.encode()).hexdigest()
+        
+        key = f"{self.namespace}:{cache_hash}"
+        
+        # Enhanced debug logging
+        logger.debug(
+            "cache_key_generated",
+            key=key,
+            request_summary={
+                "model": request_data.get("model"),
+                "has_messages": bool(request_data.get("messages")),
+                "has_input": bool(request_data.get("input")),
+                "has_instructions": bool(request_data.get("instructions")),
+                "temperature": request_data.get("temperature"),
+            }
+        )
 
-        return f"{self.namespace}:{cache_hash}"
+        return key
 
     def _should_cache(self, request_data: dict, ignore_streaming: bool = False) -> bool:
         """Determine if request should be cached"""
@@ -56,17 +110,29 @@ class CacheManager:
             extra_body = request_data.get("extra_body", {})
             cache_control = extra_body.get("cache")
         
+        logger.debug(
+            "should_cache_check",
+            cache_control=cache_control,
+            ignore_streaming=ignore_streaming,
+            is_streaming=request_data.get("stream", False),
+            has_extra_body="extra_body" in request_data
+        )
+        
         # If cache control is specified and no-cache is True, don't cache
         if cache_control and cache_control.get("no-cache", False):
+            logger.debug("should_cache_result", result=False, reason="no-cache directive")
             return False
 
         # Don't check streaming if explicitly ignored (for streaming cache implementation)
         if not ignore_streaming and request_data.get("stream", False):
             # For backward compatibility, we check if streaming caching is explicitly enabled
             # via cache control directive
-            if not (cache_control and cache_control.get("stream-cache", False)):
+            stream_cache_enabled = cache_control and cache_control.get("stream-cache", False)
+            logger.debug("should_cache_result", result=stream_cache_enabled, reason="streaming requires explicit stream-cache")
+            if not stream_cache_enabled:
                 return False
 
+        logger.debug("should_cache_result", result=True, reason="default allow")
         return True
 
     async def get(self, request_data: dict) -> Optional[dict]:
@@ -115,47 +181,130 @@ class CacheManager:
         if not self._should_cache(request_data, ignore_streaming=True):
             return None
 
-        key = f"{self._generate_cache_key(request_data)}:stream"
+        # Determine if this is a responses API request
+        is_responses_api = "input" in request_data and "messages" not in request_data
+        key_suffix = ":responses_stream" if is_responses_api else ":stream"
+        key = f"{self._generate_cache_key(request_data)}{key_suffix}"
 
         try:
-            # Get all chunks from Redis list
-            chunks = await self.redis.lrange(key, 0, -1)
-            
-            if chunks:
-                self._streaming_hits += 1
-                logger.info("streaming_cache_hit", key=key, num_chunks=len(chunks))
-                return chunks
+            # For responses API, get normalized chunks
+            if is_responses_api:
+                normalized_data = await self.redis.get(f"{key}:normalized")
+                if normalized_data:
+                    normalized_chunks = json.loads(normalized_data)
+                    # Reconstruct SSE stream from normalized chunks
+                    reconstructed_chunks = self._reconstruct_responses_stream(normalized_chunks)
+                    
+                    self._streaming_hits += 1
+                    logger.info(
+                        "streaming_cache_hit",
+                        key=key,
+                        api_type="responses",
+                        num_normalized_chunks=len(normalized_chunks),
+                        num_reconstructed_chunks=len(reconstructed_chunks)
+                    )
+                    return reconstructed_chunks
+            else:
+                # For chat completions, use the existing raw chunk approach
+                chunks = await self.redis.lrange(key, 0, -1)
+                if chunks:
+                    self._streaming_hits += 1
+                    logger.info("streaming_cache_hit", key=key, api_type="chat", num_chunks=len(chunks))
+                    return chunks
             
             self._streaming_misses += 1
-            logger.debug("streaming_cache_miss", key=key)
+            logger.debug("streaming_cache_miss", key=key, api_type="responses" if is_responses_api else "chat")
             return None
 
         except Exception as e:
             logger.error("streaming_cache_get_error", error=str(e), key=key)
             return None
 
+    def _reconstruct_responses_stream(self, normalized_chunks: List[dict]) -> List[str]:
+        """Reconstruct responses API SSE stream from normalized chunks"""
+        reconstructed = []
+        
+        # Generate new IDs for this reconstruction
+        response_id = f"resp_{uuid.uuid4().hex[:12]}"
+        message_id = f"msg_{uuid.uuid4().hex[:12]}"
+        
+        for chunk_data in normalized_chunks:
+            chunk = EventAwareChunk.from_dict(chunk_data)
+            
+            if chunk.event_type == "response.created":
+                # Reconstruct response.created event
+                event_data = {
+                    "type": "response.created",
+                    "response": {
+                        "id": response_id,
+                        "object": "response",
+                        "created": chunk.metadata.get("created", int(time.time())),
+                        "model": chunk.metadata.get("model", ""),
+                        "outputs": []
+                    }
+                }
+                reconstructed.append(f"event: response.created\n")
+                reconstructed.append(f"data: {json.dumps(event_data)}\n")
+                reconstructed.append("\n")  # Empty line between events
+                
+            elif chunk.event_type == "response.output_item.added":
+                # Reconstruct output item event
+                event_data = {
+                    "type": "response.output_item.added",
+                    "output_index": chunk.metadata.get("output_index", 0),
+                    "item": {
+                        "id": message_id if chunk.data_type == "message" else f"rs_{uuid.uuid4().hex[:12]}",
+                        "type": chunk.data_type or "message",
+                        "summary": chunk.metadata.get("summary", [])
+                    }
+                }
+                reconstructed.append(f"event: response.output_item.added\n")
+                reconstructed.append(f"data: {json.dumps(event_data)}\n")
+                reconstructed.append("\n")
+                
+            elif chunk.event_type == "response.output_text.delta":
+                # Reconstruct text delta event
+                event_data = {
+                    "type": "response.output_text.delta",
+                    "output_index": chunk.metadata.get("output_index", 0),
+                    "content_index": chunk.metadata.get("content_index", 0),
+                    "delta": chunk.content or ""
+                }
+                reconstructed.append(f"event: response.output_text.delta\n")
+                reconstructed.append(f"data: {json.dumps(event_data)}\n")
+                reconstructed.append("\n")
+                
+            elif chunk.event_type == "response.completed":
+                # Reconstruct completed event
+                event_data = {
+                    "type": "response.completed",
+                    "response": {
+                        "id": response_id,
+                        "object": "response",
+                        "created": chunk.metadata.get("created", int(time.time())),
+                        "model": chunk.metadata.get("model", ""),
+                        "outputs": chunk.metadata.get("outputs", [])
+                    }
+                }
+                reconstructed.append(f"event: response.completed\n")
+                reconstructed.append(f"data: {json.dumps(event_data)}\n")
+                reconstructed.append("\n")
+        
+        return reconstructed
+
     async def set_streaming_chunk(self, request_data: dict, chunk: str, finalize: bool = False):
         """Cache a streaming response chunk"""
         if not self._should_cache(request_data, ignore_streaming=True):
             return
 
-        key = f"{self._generate_cache_key(request_data)}:stream"
-
-        try:
-            # Push chunk to Redis list
-            await self.redis.rpush(key, chunk)
-            
-            # Set TTL when finalizing (after all chunks are stored)
-            if finalize:
-                await self.redis.expire(key, self.ttl)
-                logger.debug("streaming_cache_finalized", key=key, ttl=self.ttl)
-
-        except Exception as e:
-            logger.error("streaming_cache_set_error", error=str(e), key=key, chunk_preview=chunk[:100])
+        # This method is now handled by StreamingCacheWriter
+        logger.debug("set_streaming_chunk_deprecated", chunk_preview=chunk[:50])
 
     async def create_streaming_cache_writer(self, request_data: dict) -> "StreamingCacheWriter":
         """Create a streaming cache writer that intercepts and caches chunks"""
-        return StreamingCacheWriter(self, request_data)
+        # Determine if this is a responses API request
+        is_responses_api = "input" in request_data and "messages" not in request_data
+        return StreamingCacheWriter(self, request_data, is_responses_api=is_responses_api)
 
     def get_stats(self) -> Dict[str, int]:
         """Get cache statistics"""
@@ -257,34 +406,199 @@ class CacheManager:
 class StreamingCacheWriter:
     """Helper class to intercept and cache streaming chunks"""
     
-    def __init__(self, cache_manager: CacheManager, request_data: dict):
+    def __init__(self, cache_manager: CacheManager, request_data: dict, is_responses_api: bool = False):
         self.cache_manager = cache_manager
         self.request_data = request_data
         self.chunks_written = 0
         self._error_occurred = False
+        self.is_responses_api = is_responses_api
+        self.normalized_chunks = [] if is_responses_api else None
+        self.current_event = None
+        self.buffered_lines = []
+    
+    def _parse_responses_event(self, chunk: str) -> Optional[EventAwareChunk]:
+        """Parse a responses API SSE event and return normalized chunk"""
+        lines = chunk.strip().split('\n')
+        
+        event_type = None
+        event_data = None
+        
+        for line in lines:
+            if line.startswith("event: "):
+                event_type = line[7:].strip()
+            elif line.startswith("data: ") and event_type:
+                try:
+                    event_data = json.loads(line[6:])
+                except json.JSONDecodeError:
+                    logger.debug("parse_responses_event_json_error", line=line)
+                    continue
+        
+        if not event_type or not event_data:
+            return None
+        
+        # Create normalized chunk based on event type
+        if event_type == "response.created":
+            return EventAwareChunk(
+                event_type=event_type,
+                data_type="response",
+                metadata={
+                    "model": event_data.get("response", {}).get("model"),
+                    "created": event_data.get("response", {}).get("created")
+                }
+            )
+        
+        elif event_type == "response.output_item.added":
+            item = event_data.get("item", {})
+            return EventAwareChunk(
+                event_type=event_type,
+                data_type=item.get("type"),
+                metadata={
+                    "output_index": event_data.get("output_index"),
+                    "summary": item.get("summary", [])
+                }
+            )
+        
+        elif event_type == "response.output_text.delta":
+            return EventAwareChunk(
+                event_type=event_type,
+                data_type="text",
+                content=event_data.get("delta", ""),
+                metadata={
+                    "output_index": event_data.get("output_index", 0),
+                    "content_index": event_data.get("content_index", 0)
+                }
+            )
+        
+        elif event_type == "response.completed":
+            response = event_data.get("response", {})
+            outputs = []
+            for output in response.get("outputs", []):
+                # Filter out dynamic IDs
+                cleaned_output = {
+                    "type": output.get("type"),
+                    "content": output.get("content", [])
+                }
+                outputs.append(cleaned_output)
+            
+            return EventAwareChunk(
+                event_type=event_type,
+                data_type="response",
+                metadata={
+                    "model": response.get("model"),
+                    "created": response.get("created"),
+                    "outputs": outputs
+                }
+            )
+        
+        return None
     
     async def write_and_yield(self, chunk: str) -> str:
         """Write chunk to cache and yield it"""
+        logger.debug(
+            "streaming_cache_writer_chunk_received",
+            is_responses_api=self.is_responses_api,
+            chunk_preview=chunk[:100] if chunk else None,
+            chunk_type=type(chunk).__name__,
+            error_occurred=self._error_occurred
+        )
+        
         # Don't cache if error occurred
         if self._error_occurred:
             return chunk
             
-        # Check for error in chunk
-        if "data: " in chunk and '"error":' in chunk:
-            self._error_occurred = True
-            logger.debug("streaming_cache_writer_error_detected", chunk_preview=chunk[:100])
-            return chunk
+        # Check for error in chunk - be more specific to avoid false positives
+        if "data: " in chunk:
+            # Extract the data part after "data: "
+            data_start = chunk.find("data: ")
+            if data_start != -1:
+                data_part = chunk[data_start + 6:]
+                try:
+                    # Try to parse as JSON and check for actual error field
+                    data_json = json.loads(data_part.strip())
+                    if isinstance(data_json, dict) and "error" in data_json:
+                        self._error_occurred = True
+                        logger.debug("streaming_cache_writer_error_detected", error=data_json.get("error"))
+                        return chunk
+                except json.JSONDecodeError:
+                    # Not valid JSON, continue normally
+                    pass
         
-        # Cache the chunk
-        await self.cache_manager.set_streaming_chunk(self.request_data, chunk)
-        self.chunks_written += 1
-        
-        # If this is the [DONE] marker, finalize the cache
-        if chunk.strip() == "data: [DONE]":
-            await self.cache_manager.set_streaming_chunk(self.request_data, "", finalize=True)
-            logger.info("streaming_cache_writer_finalized", chunks_written=self.chunks_written)
+        if self.is_responses_api:
+            # For responses API, buffer lines until we have a complete event
+            self.buffered_lines.append(chunk)
+            logger.debug(
+                "responses_api_buffering_chunk",
+                buffer_size=len(self.buffered_lines),
+                is_empty_line=chunk.strip() == "",
+                is_completion=chunk.strip() == "event: response.completed"
+            )
+            
+            # Check if we have a complete event (empty line or end marker)
+            if chunk.strip() == "" or chunk.strip() == "event: response.completed":
+                # Process buffered lines as a complete event
+                full_event = "\n".join(self.buffered_lines)
+                logger.debug(
+                    "responses_api_processing_event",
+                    event_preview=full_event[:200],
+                    buffer_lines=len(self.buffered_lines)
+                )
+                
+                # Parse and normalize the event
+                normalized_chunk = self._parse_responses_event(full_event)
+                if normalized_chunk:
+                    self.normalized_chunks.append(normalized_chunk.to_dict())
+                    self.chunks_written += 1
+                    
+                    logger.debug(
+                        "responses_api_chunk_normalized",
+                        event_type=normalized_chunk.event_type,
+                        has_content=bool(normalized_chunk.content),
+                        chunk_index=self.chunks_written
+                    )
+                
+                # Clear buffer for next event
+                self.buffered_lines = []
+                
+                # Check if this is the final event
+                if "event: response.completed" in full_event:
+                    await self._finalize_responses_cache()
+        else:
+            # For chat completions, use existing approach
+            key = f"{self.cache_manager._generate_cache_key(self.request_data)}:stream"
+            try:
+                await self.cache_manager.redis.rpush(key, chunk)
+                self.chunks_written += 1
+                
+                # Check for end marker
+                if chunk.strip() == "data: [DONE]":
+                    await self.cache_manager.redis.expire(key, self.cache_manager.ttl)
+                    logger.info("chat_streaming_cache_finalized", chunks_written=self.chunks_written, key=key)
+            except Exception as e:
+                logger.error("chat_streaming_cache_error", error=str(e))
         
         return chunk
+    
+    async def _finalize_responses_cache(self):
+        """Finalize the responses API cache with normalized chunks"""
+        key = f"{self.cache_manager._generate_cache_key(self.request_data)}:responses_stream"
+        
+        try:
+            # Store normalized chunks as JSON
+            normalized_key = f"{key}:normalized"
+            await self.cache_manager.redis.setex(
+                normalized_key,
+                self.cache_manager.ttl,
+                json.dumps(self.normalized_chunks)
+            )
+            
+            logger.info(
+                "responses_streaming_cache_finalized",
+                chunks_written=self.chunks_written,
+                normalized_chunks=len(self.normalized_chunks),
+                key=key
+            )
+        except Exception as e:
+            logger.error("responses_streaming_cache_finalize_error", error=str(e), key=key)
     
     async def intercept_stream(self, stream: AsyncIterator[str]) -> AsyncIterator[str]:
         """Intercept a stream, cache chunks, and yield them"""

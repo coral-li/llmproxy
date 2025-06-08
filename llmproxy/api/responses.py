@@ -55,6 +55,49 @@ class ResponseHandler:
 
         is_streaming = request_data.get("stream", False)
 
+        # Check cache for streaming requests
+        if self.config.general_settings.cache and is_streaming:
+            # Check if caching is explicitly disabled via stream-cache: False
+            cache_control = request_data.get("cache")
+            if not cache_control:
+                extra_body = request_data.get("extra_body", {})
+                cache_control = extra_body.get("cache", {})
+            
+            # If stream-cache is explicitly False, skip cache lookup
+            stream_cache_disabled = cache_control and cache_control.get("stream-cache", True) is False
+            
+            if not stream_cache_disabled:
+                cached_chunks = await self.cache_manager.get_streaming(request_data)
+                if cached_chunks:
+                    # Create a streaming response from cached chunks
+                    async def stream_cached_response():
+                        # The cached chunks are individual lines, we need to yield them as-is
+                        # but ensure they're bytes for StreamingResponse
+                        for chunk in cached_chunks:
+                            # StreamingResponse with text/event-stream expects bytes
+                            if isinstance(chunk, str):
+                                yield chunk.encode('utf-8')
+                            else:
+                                yield chunk
+                    
+                    logger.info(
+                        "serving_cached_streaming_response",
+                        model=model,
+                        num_chunks=len(cached_chunks),
+                        latency_ms=int((time.time() - start_time) * 1000)
+                    )
+                    
+                    return StreamingResponse(
+                        stream_cached_response(),
+                        media_type="text/event-stream",
+                        headers={
+                            "Cache-Control": "no-cache",
+                            "X-Accel-Buffering": "no",
+                            "X-Proxy-Cache-Hit": "true",
+                            "X-Proxy-Latency-Ms": str(int((time.time() - start_time) * 1000)),
+                        },
+                    )
+
         # Check cache for non-streaming requests
         if self.config.general_settings.cache and not is_streaming:
             cached_response = await self.cache_manager.get(request_data)
@@ -146,16 +189,63 @@ class ResponseHandler:
 
                 # Handle streaming differently
                 if is_streaming and response.get("status_code") == 200:
-                    # For streaming, return a streaming response
-                    streaming_response = StreamingResponse(
-                        response["data"],
-                        media_type="text/event-stream",
-                        headers={
-                            "Cache-Control": "no-cache",
-                            "X-Accel-Buffering": "no",
-                            "X-Proxy-Endpoint-Base-Url": endpoint.params.get("base_url", "https://api.openai.com"),
-                        },
+                    # Check if caching is enabled for this request
+                    should_cache = self.cache_manager._should_cache(request_data, ignore_streaming=True)
+                    
+                    # Additional check for stream-cache specifically
+                    cache_control = request_data.get("cache")
+                    if not cache_control:
+                        extra_body = request_data.get("extra_body", {})
+                        cache_control = extra_body.get("cache", {})
+                    
+                    # If stream-cache is explicitly False, don't cache
+                    if cache_control and cache_control.get("stream-cache", True) is False:
+                        should_cache = False
+                    
+                    logger.debug(
+                        "streaming_response_cache_check",
+                        should_cache=should_cache,
+                        cache_enabled=self.config.general_settings.cache,
+                        request_has_cache_control="cache" in request_data or ("extra_body" in request_data and "cache" in request_data.get("extra_body", {}))
                     )
+                    
+                    if self.config.general_settings.cache and should_cache:
+                        # Create a caching interceptor
+                        logger.debug("creating_streaming_cache_writer")
+                        cache_writer = await self.cache_manager.create_streaming_cache_writer(request_data)
+                        
+                        # Wrap the stream with caching
+                        async def cached_stream():
+                            logger.debug("starting_cached_stream")
+                            async for chunk in cache_writer.intercept_stream(response["data"]):
+                                yield chunk
+                        
+                        # Return streaming response with caching
+                        streaming_response = StreamingResponse(
+                            cached_stream(),
+                            media_type="text/event-stream",
+                            headers={
+                                "Cache-Control": "no-cache",
+                                "X-Accel-Buffering": "no",
+                                "X-Proxy-Endpoint-Base-Url": endpoint.params.get("base_url", "https://api.openai.com"),
+                                "X-Proxy-Cache-Hit": "false",
+                            },
+                        )
+                        logger.debug("returning_cached_streaming_response")
+                    else:
+                        # Return streaming response without caching
+                        logger.debug("returning_non_cached_streaming_response", reason="cache_disabled" if not self.config.general_settings.cache else "should_cache_false")
+                        streaming_response = StreamingResponse(
+                            response["data"],
+                            media_type="text/event-stream",
+                            headers={
+                                "Cache-Control": "no-cache",
+                                "X-Accel-Buffering": "no",
+                                "X-Proxy-Endpoint-Base-Url": endpoint.params.get("base_url", "https://api.openai.com"),
+                                "X-Proxy-Cache-Hit": "false",
+                            },
+                        )
+                    
                     return streaming_response
 
                 # Check response status

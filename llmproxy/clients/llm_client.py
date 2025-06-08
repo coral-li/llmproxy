@@ -468,11 +468,20 @@ class LLMClient:
                     yield "data: [DONE]\n\n"
                     return
 
-                # Stream the response - Forward the raw SSE stream
-                # The httpx response already provides proper SSE formatting
-                async for chunk in response.aiter_raw():
-                    if chunk:
-                        yield chunk.decode('utf-8')
+                # Stream the response line by line for proper event parsing
+                # The responses API uses event-based SSE format that needs line-by-line processing
+                async for line in response.aiter_lines():
+                    # Yield each line with proper newline formatting
+                    if line:
+                        # Non-empty lines get a single newline
+                        yield line + "\n"
+                    else:
+                        # Empty lines indicate event boundary, add another newline
+                        yield "\n"
+                    
+                    # Log event lines for debugging
+                    if line.startswith("event: "):
+                        logger.debug("response_api_event_line", event_line=line)
 
         except httpx.TimeoutException:
             logger.error("llm_response_stream_timeout", url=url, timeout=self.timeout)
