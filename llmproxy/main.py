@@ -246,6 +246,72 @@ async def stats():
     }
 
 
+@app.delete("/cache")
+async def invalidate_cache():
+    """Invalidate all cached entries"""
+    if not cache_manager:
+        raise HTTPException(503, "Service not ready")
+    
+    try:
+        deleted_count = await cache_manager.invalidate_all()
+        logger.info("cache_invalidated_via_api", deleted_count=deleted_count)
+        
+        return {
+            "message": "Cache invalidated successfully",
+            "deleted_entries": deleted_count
+        }
+    except Exception as e:
+        logger.error("cache_invalidation_api_error", error=str(e))
+        raise HTTPException(500, f"Cache invalidation failed: {str(e)}")
+
+
+@app.delete("/cache/pattern/{pattern}")
+async def invalidate_cache_by_pattern(pattern: str):
+    """Invalidate cached entries matching a pattern"""
+    if not cache_manager:
+        raise HTTPException(503, "Service not ready")
+    
+    try:
+        deleted_count = await cache_manager.invalidate_by_pattern(pattern)
+        logger.info("cache_invalidated_by_pattern_via_api", pattern=pattern, deleted_count=deleted_count)
+        
+        return {
+            "message": f"Cache entries matching pattern '{pattern}' invalidated successfully",
+            "pattern": pattern,
+            "deleted_entries": deleted_count
+        }
+    except Exception as e:
+        logger.error("cache_invalidation_pattern_api_error", error=str(e), pattern=pattern)
+        raise HTTPException(500, f"Cache invalidation failed: {str(e)}")
+
+
+@app.post("/cache/invalidate")
+async def invalidate_cache_for_request(request: Request):
+    """Invalidate cache for a specific request"""
+    if not cache_manager:
+        raise HTTPException(503, "Service not ready")
+    
+    try:
+        request_data = await request.json()
+        success = await cache_manager.invalidate_request(request_data)
+        
+        if success:
+            logger.info("cache_invalidated_for_request_via_api", model=request_data.get("model"))
+            return {
+                "message": "Cache invalidated for request successfully",
+                "request_cached": True
+            }
+        else:
+            return {
+                "message": "No cache entry found for request",
+                "request_cached": False
+            }
+            
+    except Exception as e:
+        logger.error("cache_invalidation_request_api_error", error=str(e))
+        raise HTTPException(500, f"Cache invalidation failed: {str(e)}")
+
+
 if __name__ == "__main__":
     import uvicorn
     

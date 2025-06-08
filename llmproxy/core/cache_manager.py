@@ -176,6 +176,83 @@ class CacheManager:
             "streaming_hit_rate": streaming_hit_rate,
         }
 
+    async def invalidate_all(self) -> int:
+        """Invalidate all cached entries for this namespace"""
+        try:
+            pattern = f"{self.namespace}:*"
+            keys = await self.redis.keys(pattern)
+            
+            if keys:
+                deleted = await self.redis.delete(*keys)
+                logger.info("cache_invalidate_all", 
+                           namespace=self.namespace, 
+                           keys_deleted=deleted)
+                return deleted
+            else:
+                logger.info("cache_invalidate_all_empty", namespace=self.namespace)
+                return 0
+                
+        except Exception as e:
+            logger.error("cache_invalidate_all_error", 
+                        error=str(e), 
+                        namespace=self.namespace)
+            return 0
+
+    async def invalidate_by_pattern(self, pattern: str) -> int:
+        """Invalidate cached entries matching a pattern"""
+        try:
+            # Ensure pattern includes namespace
+            if not pattern.startswith(f"{self.namespace}:"):
+                pattern = f"{self.namespace}:{pattern}"
+                
+            keys = await self.redis.keys(pattern)
+            
+            if keys:
+                deleted = await self.redis.delete(*keys)
+                logger.info("cache_invalidate_pattern", 
+                           pattern=pattern, 
+                           keys_deleted=deleted)
+                return deleted
+            else:
+                logger.info("cache_invalidate_pattern_empty", pattern=pattern)
+                return 0
+                
+        except Exception as e:
+            logger.error("cache_invalidate_pattern_error", 
+                        error=str(e), 
+                        pattern=pattern)
+            return 0
+
+    async def invalidate_request(self, request_data: dict) -> bool:
+        """Invalidate cache for a specific request"""
+        try:
+            key = self._generate_cache_key(request_data)
+            
+            # Delete both regular and streaming cache entries
+            regular_key = key
+            streaming_key = f"{key}:stream"
+            
+            deleted = 0
+            if await self.redis.exists(regular_key):
+                deleted += await self.redis.delete(regular_key)
+            if await self.redis.exists(streaming_key):
+                deleted += await self.redis.delete(streaming_key)
+            
+            if deleted > 0:
+                logger.info("cache_invalidate_request", 
+                           key=key, 
+                           entries_deleted=deleted)
+                return True
+            else:
+                logger.debug("cache_invalidate_request_not_found", key=key)
+                return False
+                
+        except Exception as e:
+            logger.error("cache_invalidate_request_error", 
+                        error=str(e), 
+                        key=key if 'key' in locals() else 'unknown')
+            return False
+
 
 class StreamingCacheWriter:
     """Helper class to intercept and cache streaming chunks"""

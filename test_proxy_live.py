@@ -39,6 +39,36 @@ class ProxyTester:
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         print(f"[{timestamp}] {level}: {message}")
     
+    async def invalidate_all_caches(self) -> Dict[str, Any]:
+        """Invalidate all caches before starting tests"""
+        self.log("Invalidating all caches to start with clean state...")
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.delete(f"{self.base_url}/cache", timeout=10.0)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    deleted_count = data.get('deleted_entries', 0)
+                    self.log(f"✅ Cache invalidation successful: {deleted_count} entries deleted")
+                    return {
+                        "cache_invalidation": True,
+                        "deleted_entries": deleted_count
+                    }
+                else:
+                    self.log(f"⚠️  Cache invalidation returned status {response.status_code}: {response.text}", "WARNING")
+                    return {
+                        "cache_invalidation": False,
+                        "error": f"HTTP {response.status_code}: {response.text}"
+                    }
+                    
+        except Exception as e:
+            self.log(f"⚠️  Cache invalidation failed: {str(e)}", "WARNING")
+            return {
+                "cache_invalidation": False,
+                "error": str(e)
+            }
+    
     def test_basic_completion(self) -> Dict[str, Any]:
         """Test basic chat completion"""
         self.log("Testing basic chat completion...")
@@ -430,6 +460,7 @@ class ProxyTester:
             for event in stream:
                 chunk_count += 1
                 if hasattr(event, 'type') and event.type == "response.output_text.delta":
+                    print(event.model_dump_json(indent=2))
                     if hasattr(event, 'delta') and event.delta:
                         chunks.append(event.delta)
             
@@ -437,6 +468,7 @@ class ProxyTester:
             
             duration = time.time() - start_time
             full_response = "".join(chunks)
+            print("full_response: ", full_response)
             
             # Check if we received the expected content (numbers 1-5)
             has_all_numbers = all(str(i) in full_response for i in range(1, 6))
@@ -669,6 +701,10 @@ class ProxyTester:
         """Run all tests"""
         self.log("=== Starting LLMProxy Live Tests ===\n")
         
+        # Invalidate all caches first to start with clean state
+        cache_result = asyncio.run(self.invalidate_all_caches())
+        print()  # Blank line after cache invalidation
+        
         tests = [
             self.test_basic_completion,
             self.test_streaming,
@@ -783,6 +819,11 @@ def main():
     
     if args.quick:
         print("Running quick tests...\n")
+        
+        # Invalidate all caches first to start with clean state
+        cache_result = asyncio.run(tester.invalidate_all_caches())
+        print()  # Blank line after cache invalidation
+        
         result = tester.test_basic_completion()
         tester.results.append(result)
         
