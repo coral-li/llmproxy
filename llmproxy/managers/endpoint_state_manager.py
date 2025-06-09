@@ -76,7 +76,7 @@ class EndpointStateManager:
                 "endpoint_state_init_failed", endpoint_id=endpoint.id, error=str(e)
             )
 
-    async def record_request_outcome(
+    async def record_request_outcome(  # noqa: C901
         self,
         endpoint_id: str,
         success: bool,
