@@ -130,29 +130,32 @@ class CacheManager:
             global_cache_enabled=self.cache_enabled,
         )
 
-        # If cache control is specified and no-cache is True, don't cache
-        if cache_control and cache_control.get("no-cache", False):
-            logger.debug(
-                "should_cache_result", result=False, reason="no-cache directive"
-            )
-            return False
+        # -------------------------------------------------------------
+        # Per-request override: only support dict with "no-cache": bool
+        # -------------------------------------------------------------
 
-        # If no cache directive is specified, use global setting
-        if not cache_control:
+        if isinstance(cache_control, dict):
+            if cache_control.get("no-cache", False):
+                logger.debug(
+                    "should_cache_result", result=False, reason="no-cache directive"
+                )
+                return False
+
+            # Any dict without "no-cache" simply defers to global setting.
             logger.debug(
                 "should_cache_result",
                 result=self.cache_enabled,
-                reason="global cache setting",
+                reason="cache control dict without no-cache",
             )
             return self.cache_enabled
 
-        # If cache control is specified but no-cache is not set, allow caching
+        # For all other cases (including booleans), ignore directive and use global.
         logger.debug(
             "should_cache_result",
-            result=True,
-            reason="cache control specified without no-cache",
+            result=self.cache_enabled,
+            reason="no per-request cache directive or unsupported type",
         )
-        return True
+        return self.cache_enabled
 
     async def get(self, request_data: dict) -> Optional[dict]:
         """Get cached response for non-streaming requests"""
