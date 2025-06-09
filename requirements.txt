@@ -8,10 +8,6 @@ pydantic-settings
 httpx
 openai
 
-# Redis
-redis
-hiredis
-
 # Configuration
 pyyaml
 python-dotenv
@@ -25,6 +21,8 @@ pytest-asyncio
 pytest-mock
 pytest-xdist
 pytest-cov
+redis
+hiredis
 
 # Development
 black

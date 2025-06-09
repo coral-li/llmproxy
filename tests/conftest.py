@@ -5,6 +5,7 @@ import socket
 import sys
 import threading
 import time
+import subprocess
 from pathlib import Path
 from typing import Generator, Optional
 
@@ -299,6 +300,7 @@ class LLMProxyTestServer:
         self.mock_servers = []
         self.server_thread: Optional[threading.Thread] = None
         self.server: Optional[uvicorn.Server] = None
+        self.redis_process: Optional[subprocess.Popen] = None
 
     @property
     def url(self) -> str:
@@ -355,22 +357,54 @@ class LLMProxyTestServer:
         if "LLMPROXY_CONFIG" in os.environ:
             del os.environ["LLMPROXY_CONFIG"]
 
-    def _check_redis(self):
-        """Check if Redis is available"""
-        import redis
+        # Stop temporary redis server if we started one
+        if self.redis_process:
+            self.redis_process.terminate()
+            try:
+                self.redis_process.wait(timeout=5)
+            except Exception:
+                self.redis_process.kill()
+            self.redis_process = None
 
+    def _check_redis(self):
+        """Ensure Redis is running, start local instance if needed"""
+        import redis
+        from shutil import which
+
+        r = redis.Redis(host="localhost", port=6379, decode_responses=True)
         try:
-            r = redis.Redis(host="localhost", port=6379, decode_responses=True)
             r.ping()
             print("✅ Redis is available")
-        except Exception as e:
+            return
+        except Exception:
+            pass
+
+        # Try to start a local redis-server if available
+        redis_cmd = which("redis-server")
+        if not redis_cmd:
             raise RuntimeError(
-                f"❌ Redis is not available: {e}\n"
-                "Please start Redis before running tests. For example:\n"
-                "  brew services start redis  # on macOS\n"
-                "  sudo systemctl start redis  # on Linux\n"
-                "  redis-server  # manually"
+                "redis-server not found and Redis is not running.\n"
+                "Install redis-server or start Redis manually."
             )
+
+        print("⚠️  Redis not running, starting temporary redis-server for tests...")
+        self.redis_process = subprocess.Popen(
+            [redis_cmd, "--save", "", "--appendonly", "no", "--port", "6379"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        # Wait for redis to be ready
+        start = time.time()
+        while time.time() - start < 10:
+            try:
+                r.ping()
+                print("✅ Redis server started")
+                return
+            except Exception:
+                time.sleep(0.5)
+
+        raise RuntimeError("Failed to start temporary redis-server")
 
     def _wait_for_server(self, timeout: int = 30) -> None:
         """Wait for the server to be ready"""
