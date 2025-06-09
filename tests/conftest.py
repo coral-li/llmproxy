@@ -64,6 +64,8 @@ class MockOpenAIServer:
                     media_type="text/plain",
                 )
             else:
+                # Add artificial delay for cache testing (simulate network latency)
+                await asyncio.sleep(0.1)
                 return {
                     "id": "resp-mock123",
                     "object": "response",
@@ -93,6 +95,8 @@ class MockOpenAIServer:
                     media_type="text/plain",
                 )
             else:
+                # Add artificial delay for cache testing (simulate network latency)
+                await asyncio.sleep(0.1)
                 return {
                     "id": "chatcmpl-mock123",
                     "object": "chat.completion",
