@@ -71,7 +71,8 @@ async def shutdown_handler(signum: int, frame: Any) -> None:
 
     # Perform cleanup here
     if redis_client:
-        await redis_client.close()
+        # Use aclose() to properly close the async Redis client
+        await redis_client.aclose()
 
     sys.exit(0)
 
@@ -139,7 +140,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Cleanup
     logger.info("application_shutdown")
     if redis_client:
-        await redis_client.close()
+        # Use aclose() to properly close the async Redis client
+        await redis_client.aclose()
 
 
 app = FastAPI(
