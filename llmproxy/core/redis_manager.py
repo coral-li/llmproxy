@@ -33,7 +33,8 @@ class RedisManager:
             self.client = redis.Redis(connection_pool=self._pool)
 
             # Test connection
-            await self.client.ping()
+            if self.client:
+                await self.client.ping()
             logger.info("redis_connected", host=self.host, port=self.port)
 
         except Exception as e:
