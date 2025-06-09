@@ -1,38 +1,40 @@
-import sys
+import asyncio
 import os
 import signal
-import asyncio
-from datetime import datetime
-from typing import Dict, Any, Optional
+import sys
 from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 
-import redis.asyncio as aioredis
+import redis.asyncio as redis
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-# Import llmproxy modules
-from llmproxy.config.config_loader import load_config
 from llmproxy.api.routes import create_router
-from llmproxy.managers.load_balancer import LoadBalancer
-from llmproxy.managers.endpoint_state_manager import EndpointStateManager
-from llmproxy.core.cache_manager import CacheManager
 from llmproxy.clients.llm_client import LLMClient
-from llmproxy.core.logger import get_logger, setup_logging
+from llmproxy.config.config_loader import load_config
+from llmproxy.core.cache_manager import CacheManager
 from llmproxy.core.exceptions import LLMProxyError
+from llmproxy.core.logger import get_logger, setup_logging
+from llmproxy.core.redis_manager import RedisManager
+from llmproxy.managers.endpoint_state_manager import EndpointStateManager
+from llmproxy.managers.load_balancer import LoadBalancer
 
 logger = get_logger(__name__)
 
 # Global state
 load_balancer: Optional[LoadBalancer] = None
-redis_client: Optional[aioredis.Redis] = None
-endpoint_state_manager: Optional[EndpointStateManager] = None
+redis_client: Optional[redis.Redis] = None
 cache_manager: Optional[CacheManager] = None
 llm_client: Optional[LLMClient] = None
+endpoint_state_manager: Optional[EndpointStateManager] = None
 config: Optional[Any] = None
 
 
 class HealthResponse(BaseModel):
+    """Health check response model."""
+
     status: str
     timestamp: str
     version: str
@@ -42,136 +44,138 @@ class HealthResponse(BaseModel):
     model_groups: list
 
 
-async def init_redis(config) -> tuple[aioredis.Redis, EndpointStateManager]:
-    """Initialize Redis connection and state manager"""
-    redis_config = config.redis
-    
+async def init_redis(config: Any) -> Tuple[redis.Redis, EndpointStateManager]:
+    """Initialize Redis connection and endpoint state manager."""
+    redis_settings = config.general_settings
+    redis_manager = RedisManager(
+        host=redis_settings.redis_host,
+        port=redis_settings.redis_port,
+        password=redis_settings.redis_password or None,
+    )
+
+    await redis_manager.connect()
+    redis_client = redis_manager.get_client()
+
+    # Use a default state TTL of 2 hours (7200 seconds)
+    endpoint_state_manager = EndpointStateManager(
+        redis_client=redis_client,
+        state_ttl=7200,  # 2 hours default
+    )
+
+    return redis_client, endpoint_state_manager
+
+
+async def shutdown_handler(signum: int, frame: Any) -> None:
+    """Handle shutdown signals gracefully."""
+    logger.info("received_shutdown_signal", signal=signum)
+
+    # Perform cleanup here
+    if redis_client:
+        await redis_client.close()
+
+    sys.exit(0)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Application lifespan manager."""
+    global load_balancer, redis_client, cache_manager, llm_client, endpoint_state_manager, config
+
+    # Startup
+    logger.info("application_startup")
+
+    # Load configuration
+    config_path = os.getenv("LLMPROXY_CONFIG", "llmproxy.yaml")
+    config = load_config(config_path)
+    logger.info("configuration_loaded", config_path=config_path)
+
+    # Initialize Redis and endpoint state manager
     try:
-        # Connect to Redis
-        redis_conn = aioredis.Redis(
-            host=redis_config.host,
-            port=redis_config.port,
-            db=redis_config.db,
-            password=redis_config.password,
-            decode_responses=True,
-        )
-
-        # Test connection
-        await redis_conn.ping()
-        logger.info("redis_connected", host=redis_config.host, port=redis_config.port, db=redis_config.db)
-
-        # Initialize state manager with 2-hour TTL
-        state_manager = EndpointStateManager(redis_conn, state_ttl=2 * 60 * 60)
-
-        # Test state manager
-        is_healthy = await state_manager.health_check()
-        if not is_healthy:
-            raise Exception("State manager health check failed")
-
-        logger.info("endpoint_state_manager_initialized", ttl_hours=2)
-        return redis_conn, state_manager
-
+        redis_client, endpoint_state_manager = await init_redis(config)
+        logger.info("redis_initialized")
     except Exception as e:
         logger.error("redis_initialization_failed", error=str(e))
         raise
 
+    # Initialize cache manager
+    cache_ttl = 604800  # 7 days default
+    if config.general_settings.cache_params:
+        cache_ttl = config.general_settings.cache_params.ttl
 
-async def shutdown_handler(signum, frame):
-    """Handle shutdown signals"""
-    logger.info("shutdown_signal_received", signal=signum)
-    
-    global load_balancer, redis_client
-    
-    if load_balancer:
-        await load_balancer.shutdown()
-    
+    cache_manager = CacheManager(
+        redis_client=redis_client,
+        ttl=cache_ttl,
+        namespace="llmproxy",
+        cache_enabled=config.general_settings.cache,
+    )
+    logger.info("cache_manager_initialized")
+
+    # Initialize LLM client
+    llm_client = LLMClient()
+    logger.info("llm_client_initialized")
+
+    # Initialize load balancer with endpoint state manager
+    load_balancer = LoadBalancer(
+        cooldown_time=config.general_settings.cooldown_time,
+        allowed_fails=config.general_settings.allowed_fails,
+        state_manager=endpoint_state_manager,
+    )
+    await load_balancer.initialize_from_config(config)
+    logger.info("load_balancer_initialized")
+
+    # Setup signal handlers for graceful shutdown (only in main thread)
+    try:
+        loop = asyncio.get_event_loop()
+        for sig in [signal.SIGINT, signal.SIGTERM]:
+            loop.add_signal_handler(
+                sig, lambda: asyncio.create_task(shutdown_handler(sig, None))
+            )
+    except RuntimeError as e:
+        # Signal handlers can only be set in the main thread
+        logger.info("signal_handlers_skipped", reason=str(e))
+
+    yield
+
+    # Cleanup
+    logger.info("application_shutdown")
     if redis_client:
         await redis_client.close()
-    
-    logger.info("application_shutdown_complete")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan manager"""
-    global load_balancer, redis_client, endpoint_state_manager, cache_manager, llm_client, config
-
-    # Initialize
-    try:
-        config = load_config()
-        
-        # Initialize Redis and state manager
-        redis_client, endpoint_state_manager = await init_redis(config)
-        
-        # Initialize cache manager
-        cache_manager = CacheManager(redis_client, namespace="llmproxy")
-        
-        # Initialize LLM client with default timeout
-        llm_client = LLMClient(timeout=6000.0)  # 100 minutes timeout
-        
-        # Initialize load balancer with state management
-        load_balancer = LoadBalancer(
-            cooldown_time=config.general_settings.cooldown_time,
-            allowed_fails=config.general_settings.allowed_fails,
-            state_manager=endpoint_state_manager,
-        )
-        
-        # Initialize from config (will set up Redis state)
-        await load_balancer.initialize_from_config(config)
-        
-        logger.info("application_started_successfully")
-        
-        yield
-        
-    except Exception as e:
-        logger.error("application_startup_failed", error=str(e))
-        raise
-    finally:
-        # Cleanup
-        if load_balancer:
-            await load_balancer.shutdown()
-        if llm_client:
-            await llm_client.close()
-        if redis_client:
-            await redis_client.close()
-        logger.info("application_cleanup_complete")
-
-
-# Create FastAPI app
 app = FastAPI(
     title="LLM Proxy",
-    description="A load-balancing proxy for LLM APIs with Redis state sharing",
+    description="A load balancing proxy for LLM API endpoints",
     version="1.0.0",
     lifespan=lifespan,
 )
 
 
 @app.get("/health", response_model=HealthResponse)
-async def health():
-    """Health check endpoint"""
-    global load_balancer, redis_client, endpoint_state_manager
-    
+async def health() -> HealthResponse:
+    """Health check endpoint."""
+    global load_balancer, redis_client, endpoint_state_manager  # noqa: F824
+
     redis_connected = False
     state_sharing_enabled = False
     endpoints_configured = 0
     model_groups = []
-    
+
     if redis_client:
         try:
             await redis_client.ping()
             redis_connected = True
         except Exception:
             pass
-    
+
     if endpoint_state_manager:
         state_sharing_enabled = await endpoint_state_manager.health_check()
-    
+
     if load_balancer:
         model_groups = load_balancer.get_model_groups()
         # Count endpoints from configs
         for group_configs in load_balancer.endpoint_configs.values():
             endpoints_configured += len(group_configs)
-    
+
     return HealthResponse(
         status="healthy" if redis_connected and state_sharing_enabled else "degraded",
         timestamp=datetime.utcnow().isoformat(),
@@ -185,19 +189,19 @@ async def health():
 
 @app.get("/stats")
 async def get_stats() -> Dict[str, Any]:
-    """Get endpoint statistics from Redis"""
-    global load_balancer
-    
+    """Get endpoint statistics from Redis."""
+    global load_balancer  # noqa: F824
+
     if not load_balancer:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Load balancer not initialized",
         )
-    
+
     try:
         # Get fresh stats directly from Redis
         endpoint_stats = await load_balancer.get_all_endpoints_stats()
-        
+
         return {
             "timestamp": datetime.utcnow().isoformat(),
             "model_groups": endpoint_stats,
@@ -213,8 +217,10 @@ async def get_stats() -> Dict[str, Any]:
 
 
 @app.exception_handler(LLMProxyError)
-async def llm_proxy_exception_handler(request: Request, exc: LLMProxyError):
-    """Handle LLMProxy-specific exceptions"""
+async def llm_proxy_exception_handler(
+    request: Request, exc: LLMProxyError
+) -> JSONResponse:
+    """Handle LLMProxy-specific exceptions."""
     logger.error(
         "llm_proxy_error",
         error_type=type(exc).__name__,
@@ -227,32 +233,29 @@ async def llm_proxy_exception_handler(request: Request, exc: LLMProxyError):
     )
 
 
-
-
-
 @app.delete("/cache")
 async def clear_cache() -> Dict[str, Any]:
-    """Clear all cache entries (for testing)"""
+    """Clear all cache entries (for testing)."""
     if not redis_client:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Redis not available",
         )
-    
+
     try:
         # Get all keys in the cache namespace
         keys = await redis_client.keys("llmproxy:*")
-        
+
         deleted_count = 0
         if keys:
             deleted_count = await redis_client.delete(*keys)
-        
+
         logger.info("cache_cleared", deleted_entries=deleted_count)
-        
+
         return {
             "timestamp": datetime.utcnow().isoformat(),
             "deleted_entries": deleted_count,
-            "status": "success"
+            "status": "success",
         }
     except Exception as e:
         logger.error("cache_clear_failed", error=str(e))
@@ -262,35 +265,77 @@ async def clear_cache() -> Dict[str, Any]:
         )
 
 
+# Dependency functions that ensure non-None returns
+def get_cache_manager_required() -> CacheManager:
+    """Get cache manager with validation."""
+    if cache_manager is None:
+        raise HTTPException(status_code=503, detail="Cache manager not initialized")
+    return cache_manager
+
+
+def get_llm_client_required() -> LLMClient:
+    """Get LLM client with validation."""
+    if llm_client is None:
+        raise HTTPException(status_code=503, detail="LLM client not initialized")
+    return llm_client
+
+
+def get_config_required() -> Any:
+    """Get config with validation."""
+    if config is None:
+        raise HTTPException(status_code=503, detail="Config not initialized")
+    return config
+
+
 # Include API routes with /v1 prefix
 app.include_router(
     create_router(
-        get_load_balancer=lambda: load_balancer,
-        cache_manager=lambda: cache_manager,
-        llm_client=lambda: llm_client,
-        config=lambda: config
+        get_load_balancer=lambda: load_balancer or LoadBalancer(),
+        cache_manager=get_cache_manager_required,
+        llm_client=get_llm_client_required,
+        config=get_config_required,
     ),
-    prefix="/v1"
+    prefix="/v1",
 )
 
 # Also include routes without prefix for direct access
 app.include_router(
     create_router(
-        get_load_balancer=lambda: load_balancer,
-        cache_manager=lambda: cache_manager,
-        llm_client=lambda: llm_client,
-        config=lambda: config
+        get_load_balancer=lambda: load_balancer or LoadBalancer(),
+        cache_manager=get_cache_manager_required,
+        llm_client=get_llm_client_required,
+        config=get_config_required,
     )
 )
 
 
-def main():
-    """Main entry point for uvicorn"""
+def get_load_balancer() -> Optional[LoadBalancer]:
+    """Dependency injection for load balancer."""
+    return load_balancer
+
+
+def get_cache_manager() -> Optional[CacheManager]:
+    """Dependency injection for cache manager."""
+    return cache_manager
+
+
+def get_llm_client() -> Optional[LLMClient]:
+    """Dependency injection for LLM client."""
+    return llm_client
+
+
+def get_config() -> Any:
+    """Dependency injection for config."""
+    return config
+
+
+def main() -> None:
+    """Main entry point for uvicorn."""
     import uvicorn
-    
+
     # Set up logging first
     setup_logging()
-    
+
     try:
         uvicorn.run(
             "llmproxy.main:app",

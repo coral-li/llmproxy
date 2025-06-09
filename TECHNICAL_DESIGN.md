@@ -20,49 +20,49 @@ class LoadBalancer:
         self.cooldown_time = cooldown_time
         self.endpoint_pools: Dict[str, List[Endpoint]] = {}
         self._lock = asyncio.Lock()
-    
+
     async def select_endpoint(self, model_group: str) -> Optional[Endpoint]:
         """Select an endpoint using weighted round-robin with health checks"""
         async with self._lock:
             pool = self.endpoint_pools.get(model_group, [])
-            
+
             # Filter available endpoints
             available = [ep for ep in pool if await self._is_available(ep)]
-            
+
             if not available:
                 # All endpoints are down, try weight=0 fallbacks
                 fallbacks = [ep for ep in pool if ep.weight == 0]
                 available = [ep for ep in fallbacks if await self._is_available(ep)]
-            
+
             if not available:
                 return None
-            
+
             # Weighted random selection
             total_weight = sum(ep.weight for ep in available)
             if total_weight == 0:
                 return random.choice(available)
-            
+
             rand = random.uniform(0, total_weight)
             cumulative = 0
-            
+
             for endpoint in available:
                 cumulative += endpoint.weight
                 if rand <= cumulative:
                     return endpoint
-            
+
             return available[-1]
-    
+
     async def _is_available(self, endpoint: Endpoint) -> bool:
         """Check if endpoint is available for requests"""
         if endpoint.status == EndpointStatus.HEALTHY:
             return True
-        
+
         if endpoint.status == EndpointStatus.COOLING_DOWN:
             if datetime.utcnow() > endpoint.cooldown_until:
                 endpoint.status = EndpointStatus.HEALTHY
                 endpoint.consecutive_failures = 0
                 return True
-        
+
         return False
 ```
 
@@ -84,45 +84,45 @@ class RateLimitManager:
         self.redis = redis_client
         self._local_cache: Dict[str, dict] = {}
         self._lock = asyncio.Lock()
-    
+
     async def check_availability(self, endpoint_id: str) -> Tuple[bool, Optional[int]]:
         """Check if endpoint has available capacity
         Returns: (is_available, seconds_until_reset)
         """
         key = f"ratelimit:{endpoint_id}"
-        
+
         # Get rate limit info from Redis
         data = await self.redis.get(key)
         if not data:
             return True, None
-        
+
         limit_info = json.loads(data)
-        
+
         # Check token bucket
         tokens = limit_info.get('tokens', 0)
         reset_at = datetime.fromisoformat(limit_info.get('reset_at'))
-        
+
         if datetime.utcnow() >= reset_at:
             # Reset period has passed
             return True, None
-        
+
         if tokens > 0:
             return True, None
-        
+
         # Calculate wait time
         wait_seconds = int((reset_at - datetime.utcnow()).total_seconds())
         return False, wait_seconds
-    
+
     async def update_from_headers(self, endpoint_id: str, headers: dict):
         """Update rate limit info from response headers"""
         # Parse OpenAI rate limit headers
         remaining = headers.get('x-ratelimit-remaining-requests')
         limit = headers.get('x-ratelimit-limit-requests')
         reset = headers.get('x-ratelimit-reset-requests')
-        
+
         if not all([remaining, limit, reset]):
             return
-        
+
         # Update Redis
         key = f"ratelimit:{endpoint_id}"
         data = {
@@ -131,9 +131,9 @@ class RateLimitManager:
             'reset_at': reset,
             'updated_at': datetime.utcnow().isoformat()
         }
-        
+
         await self.redis.setex(
-            key, 
+            key,
             3600,  # 1 hour TTL
             json.dumps(data)
         )
@@ -157,7 +157,7 @@ class CacheManager:
         self.redis = redis_client
         self.ttl = ttl
         self.namespace = namespace
-    
+
     def _generate_cache_key(self, request_data: dict) -> str:
         """Generate cache key from request parameters"""
         # Extract relevant fields for caching
@@ -172,32 +172,32 @@ class CacheManager:
             'tools': request_data.get('tools'),
             'tool_choice': request_data.get('tool_choice'),
         }
-        
+
         # Create deterministic hash
         cache_str = json.dumps(cache_data, sort_keys=True)
         cache_hash = hashlib.sha256(cache_str.encode()).hexdigest()
-        
+
         return f"{self.namespace}:{cache_hash}"
-    
+
     async def get(self, request_data: dict) -> Optional[dict]:
         """Get cached response"""
         # Don't cache streaming requests
         if request_data.get('stream', False):
             return None
-        
+
         key = self._generate_cache_key(request_data)
         data = await self.redis.get(key)
-        
+
         if data:
             return json.loads(data)
         return None
-    
+
     async def set(self, request_data: dict, response_data: dict):
         """Cache response"""
         # Don't cache streaming responses or errors
         if request_data.get('stream', False) or 'error' in response_data:
             return
-        
+
         key = self._generate_cache_key(request_data)
         await self.redis.setex(
             key,
@@ -222,7 +222,7 @@ class LLMClient:
     def __init__(self, timeout: float = 60.0):
         self.timeout = timeout
         self.client = httpx.AsyncClient(timeout=timeout)
-    
+
     async def create_chat_completion(
         self,
         endpoint_url: str,
@@ -232,24 +232,24 @@ class LLMClient:
         stream: bool = False
     ) -> Union[dict, AsyncIterator[str]]:
         """Make chat completion request to OpenAI-compatible endpoint"""
-        
+
         # Prepare headers
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
-        
+
         # Handle Azure OpenAI query parameters
         params = default_query or {}
-        
+
         # Build full URL
         url = urljoin(endpoint_url, "/v1/chat/completions")
-        
+
         if stream:
             return self._stream_request(url, headers, params, request_data)
         else:
             return await self._request(url, headers, params, request_data)
-    
+
     async def _request(self, url: str, headers: dict, params: dict, data: dict) -> dict:
         """Make non-streaming request"""
         response = await self.client.post(
@@ -258,7 +258,7 @@ class LLMClient:
             params=params,
             json=data
         )
-        
+
         # Return response with headers for rate limit parsing
         return {
             'status_code': response.status_code,
@@ -266,12 +266,12 @@ class LLMClient:
             'data': response.json() if response.status_code == 200 else None,
             'error': response.text if response.status_code != 200 else None
         }
-    
+
     async def _stream_request(
-        self, 
-        url: str, 
-        headers: dict, 
-        params: dict, 
+        self,
+        url: str,
+        headers: dict,
+        params: dict,
         data: dict
     ) -> AsyncIterator[str]:
         """Make streaming request"""
@@ -321,10 +321,10 @@ redis_manager = None
 async def startup_event():
     """Initialize all components"""
     global config, load_balancer, rate_limit_manager, cache_manager, llm_client, redis_manager
-    
+
     # Load configuration
     config = load_config("llmproxy.yaml")
-    
+
     # Initialize Redis
     redis_manager = RedisManager(
         host=config.general_settings.redis_host,
@@ -332,7 +332,7 @@ async def startup_event():
         password=config.general_settings.redis_password
     )
     await redis_manager.connect()
-    
+
     # Initialize components
     load_balancer = LoadBalancer(config.general_settings.cooldown_time)
     rate_limit_manager = RateLimitManager(redis_manager.client)
@@ -341,7 +341,7 @@ async def startup_event():
         ttl=config.general_settings.cache_params.ttl
     )
     llm_client = LLMClient()
-    
+
     # Initialize endpoint pools
     await load_balancer.initialize_from_config(config)
 
@@ -349,18 +349,18 @@ async def startup_event():
 async def chat_completions(request: Request):
     """OpenAI-compatible chat completions endpoint"""
     request_data = await request.json()
-    
+
     # Extract model to determine model group
     model = request_data.get('model')
     if not model:
         raise HTTPException(400, "Model is required")
-    
+
     # Check cache
     if config.general_settings.cache and not request_data.get('stream', False):
         cached_response = await cache_manager.get(request_data)
         if cached_response:
             return cached_response
-    
+
     # Get handler
     handler = ChatCompletionHandler(
         load_balancer=load_balancer,
@@ -369,7 +369,7 @@ async def chat_completions(request: Request):
         llm_client=llm_client,
         config=config
     )
-    
+
     # Process request
     return await handler.handle_request(request_data)
 
@@ -397,23 +397,23 @@ sequenceDiagram
     participant RateLimiter
     participant LLMClient
     participant Upstream
-    
+
     Client->>API: POST /v1/chat/completions
     API->>Cache: Check cache
     Cache-->>API: Cache miss
-    
+
     API->>LoadBalancer: Select endpoint
     LoadBalancer->>RateLimiter: Check availability
     RateLimiter-->>LoadBalancer: Available
     LoadBalancer-->>API: Selected endpoint
-    
+
     API->>LLMClient: Forward request
     LLMClient->>Upstream: HTTP request
     Upstream-->>LLMClient: Response + headers
-    
+
     LLMClient->>RateLimiter: Update limits
     LLMClient-->>API: Response
-    
+
     API->>Cache: Store response
     API-->>Client: Return response
 ```
@@ -433,7 +433,7 @@ class RetryHandler:
     def __init__(self, max_retries: int = 3, base_delay: float = 1.0):
         self.max_retries = max_retries
         self.base_delay = base_delay
-    
+
     async def execute_with_retry(
         self,
         func: Callable,
@@ -442,19 +442,19 @@ class RetryHandler:
     ) -> Any:
         """Execute function with exponential backoff retry"""
         last_error = None
-        
+
         for attempt in range(self.max_retries):
             try:
                 return await func(*args, **kwargs)
             except Exception as e:
                 last_error = e
-                
+
                 if attempt < self.max_retries - 1:
                     # Calculate delay with jitter
                     delay = self.base_delay * (2 ** attempt)
                     jitter = random.uniform(0, delay * 0.1)
                     await asyncio.sleep(delay + jitter)
-                
+
         raise last_error
 ```
 
@@ -484,13 +484,13 @@ class Endpoint:
         self.failed_requests = 0
         self.last_error: Optional[str] = None
         self.last_error_time: Optional[datetime] = None
-    
+
     def record_success(self):
         """Record successful request"""
         self.total_requests += 1
         self.consecutive_failures = 0
         self.status = EndpointStatus.HEALTHY
-    
+
     def record_failure(self, error: str, cooldown_time: int):
         """Record failed request and update status"""
         self.total_requests += 1
@@ -498,7 +498,7 @@ class Endpoint:
         self.consecutive_failures += 1
         self.last_error = error
         self.last_error_time = datetime.utcnow()
-        
+
         # Apply circuit breaker logic
         if self.consecutive_failures >= 3:
             self.status = EndpointStatus.COOLING_DOWN
@@ -531,4 +531,4 @@ Key metrics to track:
 - Error rates by type
 - Request volume by model
 
-This technical design provides a solid foundation for implementing a production-ready LLMProxy with high performance, reliability, and maintainability. 
+This technical design provides a solid foundation for implementing a production-ready LLMProxy with high performance, reliability, and maintainability.

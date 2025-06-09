@@ -1,11 +1,12 @@
-import json
 import asyncio
-from typing import Dict, Optional, List, Any
-import redis.asyncio as redis
+import json
 from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
 
-from llmproxy.models.endpoint import Endpoint, EndpointStatus
+import redis.asyncio as redis
+
 from llmproxy.core.logger import get_logger
+from llmproxy.models.endpoint import Endpoint
 
 logger = get_logger(__name__)
 
@@ -30,7 +31,7 @@ class EndpointStateManager:
         """Initialize endpoint state in Redis if it doesn't exist"""
         try:
             key = self._get_endpoint_key(endpoint.id)
-            
+
             # Check if state already exists
             existing_data = await self.redis.get(key)
             if not existing_data:
@@ -53,41 +54,53 @@ class EndpointStateManager:
                     "created_at": datetime.utcnow().isoformat(),
                     "updated_at": datetime.utcnow().isoformat(),
                 }
-                
+
                 await self.redis.setex(key, self.state_ttl, json.dumps(initial_state))
                 await self.register_endpoint_in_group(model_group, endpoint.id)
-                
+
                 logger.info(
                     "endpoint_state_initialized",
                     endpoint_id=endpoint.id,
                     model_group=model_group,
-                    base_url=endpoint.base_url
+                    base_url=endpoint.base_url,
                 )
             else:
                 logger.info(
                     "endpoint_state_exists",
                     endpoint_id=endpoint.id,
-                    model_group=model_group
+                    model_group=model_group,
                 )
 
         except Exception as e:
-            logger.error("endpoint_state_init_failed", endpoint_id=endpoint.id, error=str(e))
+            logger.error(
+                "endpoint_state_init_failed", endpoint_id=endpoint.id, error=str(e)
+            )
 
-    async def record_request_outcome(self, endpoint_id: str, success: bool, error: str = None, allowed_fails: int = 1, cooldown_time: int = 60) -> None:
+    async def record_request_outcome(
+        self,
+        endpoint_id: str,
+        success: bool,
+        error: Optional[str] = None,
+        allowed_fails: int = 1,
+        cooldown_time: int = 60,
+    ) -> None:
         """Record a request outcome and update endpoint state atomically"""
         try:
             key = self._get_endpoint_key(endpoint_id)
-            
+
             # Get current state
             current_data = await self.redis.get(key)
             if not current_data:
-                logger.info("endpoint_state_missing_for_request_creating_default", endpoint_id=endpoint_id)
+                logger.info(
+                    "endpoint_state_missing_for_request_creating_default",
+                    endpoint_id=endpoint_id,
+                )
                 # Create a minimal default state if endpoint state is missing
                 state_data = {
                     "id": endpoint_id,
                     "model": "unknown",
                     "weight": 1,
-                    "base_url": "unknown", 
+                    "base_url": "unknown",
                     "is_azure": False,
                     "allowed_fails": allowed_fails,
                     "status": "healthy",
@@ -103,10 +116,14 @@ class EndpointStateManager:
                 }
             else:
                 state_data = json.loads(current_data)
-            
+
             # Update counters
-            state_data["total_requests"] = state_data.get("total_requests", 0) + 1
-            
+            total_requests = state_data.get("total_requests", 0)
+            total_requests_int = (
+                int(total_requests) if isinstance(total_requests, (int, str)) else 0
+            )
+            state_data["total_requests"] = total_requests_int + 1
+
             if success:
                 # Success: reset failures, mark healthy
                 state_data["consecutive_failures"] = 0
@@ -115,29 +132,51 @@ class EndpointStateManager:
                 state_data["last_success_time"] = datetime.utcnow().isoformat()
             else:
                 # Failure: increment counters, check for cooldown
-                state_data["failed_requests"] = state_data.get("failed_requests", 0) + 1
-                state_data["consecutive_failures"] = state_data.get("consecutive_failures", 0) + 1
+                failed_requests = state_data.get("failed_requests", 0)
+                failed_requests_int = (
+                    int(failed_requests)
+                    if isinstance(failed_requests, (int, str))
+                    else 0
+                )
+                state_data["failed_requests"] = failed_requests_int + 1
+
+                consecutive_failures = state_data.get("consecutive_failures", 0)
+                consecutive_failures_int = (
+                    int(consecutive_failures)
+                    if isinstance(consecutive_failures, (int, str))
+                    else 0
+                )
+                state_data["consecutive_failures"] = consecutive_failures_int + 1
+
                 state_data["last_error"] = error
                 state_data["last_error_time"] = datetime.utcnow().isoformat()
-                
+
                 # Check if we should enter cooldown
-                if state_data["consecutive_failures"] >= allowed_fails:
+                current_failures_val = state_data["consecutive_failures"]
+                current_failures = (
+                    int(current_failures_val)
+                    if isinstance(current_failures_val, (int, str))
+                    else 0
+                )
+                if current_failures >= allowed_fails:
                     state_data["status"] = "cooling_down"
-                    cooldown_until = datetime.utcnow() + timedelta(seconds=cooldown_time)
+                    cooldown_until = datetime.utcnow() + timedelta(
+                        seconds=cooldown_time
+                    )
                     state_data["cooldown_until"] = cooldown_until.isoformat()
-            
+
             state_data["updated_at"] = datetime.utcnow().isoformat()
-            
+
             # Save updated state atomically
             await self.redis.setex(key, self.state_ttl, json.dumps(state_data))
-            
+
             logger.debug(
                 "endpoint_request_recorded",
                 endpoint_id=endpoint_id,
                 success=success,
                 total_requests=state_data["total_requests"],
                 failed_requests=state_data["failed_requests"],
-                status=state_data["status"]
+                status=state_data["status"],
             )
 
         except Exception as e:
@@ -145,7 +184,7 @@ class EndpointStateManager:
                 "endpoint_request_record_failed",
                 endpoint_id=endpoint_id,
                 success=success,
-                error=str(e)
+                error=str(e),
             )
 
     async def is_endpoint_available(self, endpoint_id: str) -> bool:
@@ -154,9 +193,9 @@ class EndpointStateManager:
             state_data = await self.get_endpoint_state(endpoint_id)
             if not state_data:
                 return True  # Default to available if no state found
-                
+
             status = state_data.get("status", "healthy")
-            
+
             if status == "healthy":
                 return True
             elif status == "cooling_down":
@@ -168,11 +207,15 @@ class EndpointStateManager:
                         await self._mark_endpoint_healthy(endpoint_id)
                         return True
                 return False
-            
+
             return False
-            
+
         except Exception as e:
-            logger.error("endpoint_availability_check_failed", endpoint_id=endpoint_id, error=str(e))
+            logger.error(
+                "endpoint_availability_check_failed",
+                endpoint_id=endpoint_id,
+                error=str(e),
+            )
             return True  # Default to available on error
 
     async def _mark_endpoint_healthy(self, endpoint_id: str) -> None:
@@ -186,26 +229,31 @@ class EndpointStateManager:
                 state_data["consecutive_failures"] = 0
                 state_data["cooldown_until"] = None
                 state_data["updated_at"] = datetime.utcnow().isoformat()
-                
+
                 await self.redis.setex(key, self.state_ttl, json.dumps(state_data))
-                
+
                 logger.debug("endpoint_marked_healthy", endpoint_id=endpoint_id)
-                
+
         except Exception as e:
-            logger.error("endpoint_health_marking_failed", endpoint_id=endpoint_id, error=str(e))
+            logger.error(
+                "endpoint_health_marking_failed", endpoint_id=endpoint_id, error=str(e)
+            )
 
     async def get_endpoint_state(self, endpoint_id: str) -> Optional[Dict[str, Any]]:
         """Get complete endpoint state from Redis"""
         try:
             key = self._get_endpoint_key(endpoint_id)
             data = await self.redis.get(key)
-            
+
             if data:
-                return json.loads(data)
+                parsed_data = json.loads(data)
+                return parsed_data if isinstance(parsed_data, dict) else None
             return None
 
         except Exception as e:
-            logger.error("endpoint_state_get_failed", endpoint_id=endpoint_id, error=str(e))
+            logger.error(
+                "endpoint_state_get_failed", endpoint_id=endpoint_id, error=str(e)
+            )
             return None
 
     async def get_endpoint_stats(self, endpoint_id: str) -> Dict[str, Any]:
@@ -224,13 +272,13 @@ class EndpointStateManager:
                 "last_success_time": None,
                 "cooldown_until": None,
             }
-        
+
         total_requests = state_data.get("total_requests", 0)
         failed_requests = state_data.get("failed_requests", 0)
         success_rate = 0
         if total_requests > 0:
             success_rate = ((total_requests - failed_requests) / total_requests) * 100
-        
+
         return {
             "id": state_data.get("id", endpoint_id),
             "model": state_data.get("model"),
@@ -248,17 +296,19 @@ class EndpointStateManager:
             "cooldown_until": state_data.get("cooldown_until"),
         }
 
-    async def register_endpoint_in_group(self, model_group: str, endpoint_id: str) -> None:
+    async def register_endpoint_in_group(
+        self, model_group: str, endpoint_id: str
+    ) -> None:
         """Register an endpoint as part of a model group"""
         try:
             key = self._get_model_group_key(model_group)
-            await self.redis.sadd(key, endpoint_id)
+            await self.redis.sadd(key, endpoint_id)  # type: ignore
             await self.redis.expire(key, self.state_ttl)
-            
+
             logger.debug(
                 "endpoint_registered_in_group",
                 model_group=model_group,
-                endpoint_id=endpoint_id
+                endpoint_id=endpoint_id,
             )
 
         except Exception as e:
@@ -266,21 +316,19 @@ class EndpointStateManager:
                 "endpoint_group_registration_failed",
                 model_group=model_group,
                 endpoint_id=endpoint_id,
-                error=str(e)
+                error=str(e),
             )
 
     async def get_group_endpoints(self, model_group: str) -> List[str]:
         """Get all endpoint IDs for a model group"""
         try:
             key = self._get_model_group_key(model_group)
-            endpoint_ids = await self.redis.smembers(key)
+            endpoint_ids = await self.redis.smembers(key)  # type: ignore
             return list(endpoint_ids) if endpoint_ids else []
 
         except Exception as e:
             logger.error(
-                "group_endpoints_fetch_failed",
-                model_group=model_group,
-                error=str(e)
+                "group_endpoints_fetch_failed", model_group=model_group, error=str(e)
             )
             return []
 
@@ -292,14 +340,14 @@ class EndpointStateManager:
             keys = []
             async for key in self.redis.scan_iter(match=pattern):
                 keys.append(key)
-            
+
             # Identify stale keys
             stale_keys = []
             for key in keys:
                 endpoint_id = key.split(":")[-1]
                 if endpoint_id not in active_endpoint_ids:
                     stale_keys.append(key)
-            
+
             # Delete stale keys
             if stale_keys:
                 await self.redis.delete(*stale_keys)
@@ -313,12 +361,12 @@ class EndpointStateManager:
         try:
             test_key = "llmproxy:health_check"
             test_value = datetime.utcnow().isoformat()
-            
+
             await self.redis.setex(test_key, 60, test_value)
             result = await self.redis.get(test_key)
             await self.redis.delete(test_key)
-            
-            return result == test_value
+
+            return bool(result == test_value)
 
         except Exception as e:
             logger.error("state_manager_health_check_failed", error=str(e))
@@ -328,37 +376,46 @@ class EndpointStateManager:
         """Ensure endpoint has proper state, creating or updating as needed"""
         try:
             key = self._get_endpoint_key(endpoint.id)
-            
+
             # Get current state
             current_data = await self.redis.get(key)
             if not current_data:
                 # No state exists, initialize fully
                 await self.initialize_endpoint(endpoint, model_group)
                 return
-            
+
             state_data = json.loads(current_data)
-            
+
             # Check if this is a minimal default state (missing proper endpoint info)
-            if (state_data.get("model") == "unknown" or 
-                state_data.get("base_url") == "unknown"):
-                
+            if (
+                state_data.get("model") == "unknown"
+                or state_data.get("base_url") == "unknown"
+            ):
                 logger.info("upgrading_minimal_endpoint_state", endpoint_id=endpoint.id)
-                
+
                 # Preserve counters and status but update endpoint info
-                state_data.update({
-                    "model": endpoint.model,
-                    "weight": endpoint.weight,
-                    "base_url": endpoint.base_url,
-                    "is_azure": endpoint.is_azure,
-                    "allowed_fails": endpoint.allowed_fails,
-                    "updated_at": datetime.utcnow().isoformat(),
-                })
-                
+                state_data.update(
+                    {
+                        "model": endpoint.model,
+                        "weight": endpoint.weight,
+                        "base_url": endpoint.base_url,
+                        "is_azure": endpoint.is_azure,
+                        "allowed_fails": endpoint.allowed_fails,
+                        "updated_at": datetime.utcnow().isoformat(),
+                    }
+                )
+
                 # Save updated state
                 await self.redis.setex(key, self.state_ttl, json.dumps(state_data))
                 await self.register_endpoint_in_group(model_group, endpoint.id)
-                
-                logger.info("endpoint_state_upgraded", endpoint_id=endpoint.id, model_group=model_group)
+
+                logger.info(
+                    "endpoint_state_upgraded",
+                    endpoint_id=endpoint.id,
+                    model_group=model_group,
+                )
 
         except Exception as e:
-            logger.error("endpoint_state_ensure_failed", endpoint_id=endpoint.id, error=str(e)) 
+            logger.error(
+                "endpoint_state_ensure_failed", endpoint_id=endpoint.id, error=str(e)
+            )

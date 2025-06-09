@@ -7,13 +7,13 @@ model_groups:
         params:
           api_key: test-key-1
           base_url: http://localhost:8001
-          
+
       - model: gpt-3.5-turbo
         weight: 1
         params:
           api_key: test-key-2
           base_url: http://localhost:8002
-          
+
       # Fallback endpoint with weight 0
       - model: gpt-3.5-turbo
         weight: 0
@@ -27,14 +27,14 @@ general_settings:
   num_retries: 3
   allowed_fails: 1
   cooldown_time: 60
-  
+
   # Redis settings (use local Redis)
   redis_host: localhost
   redis_port: 6379
   redis_password: ""
-  
+
   cache: true
   cache_params:
     type: redis
     ttl: 300  # 5 minutes for testing
-    namespace: "llmproxy.test" 
+    namespace: "llmproxy.test"

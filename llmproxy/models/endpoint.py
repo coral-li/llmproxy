@@ -1,8 +1,7 @@
-from enum import Enum
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
 import hashlib
 import json
+from enum import Enum
+from typing import Any, Dict
 
 
 class EndpointStatus(Enum):
@@ -41,10 +40,10 @@ class Endpoint:
             "deployment": params.get("deployment"),  # Azure deployment name
             "api_version": params.get("api_version"),  # Azure API version
         }
-        
+
         # Remove None values
         id_data = {k: v for k, v in id_data.items() if v is not None}
-        
+
         # Create deterministic hash
         id_str = json.dumps(id_data, sort_keys=True)
         return hashlib.sha256(id_str.encode()).hexdigest()[:16]
@@ -60,5 +59,5 @@ class Endpoint:
             "allowed_fails": self.allowed_fails,
         }
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Endpoint {self.model} {self.base_url}>"

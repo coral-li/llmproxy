@@ -1,7 +1,7 @@
-import yaml
 import os
-from typing import Any, Dict, List, Union
-from pathlib import Path
+from typing import Any, Optional
+
+import yaml
 
 from llmproxy.config_model import LLMProxyConfig
 
@@ -39,20 +39,23 @@ def resolve_env_vars(data: Any) -> Any:
     return resolved_data
 
 
-def load_config(config_path: str = None) -> LLMProxyConfig:
+def load_config(config_path: Optional[str] = None) -> LLMProxyConfig:
     """
     Load and validate YAML configuration using the Pydantic model
 
     Args:
         config_path: Path to the YAML configuration file. If not provided,
-                    looks for 'llmproxy.yaml' in the current working directory.
+                    checks LLMPROXY_CONFIG environment variable, then defaults to
+                    'llmproxy.yaml' in the current working directory.
 
     Returns:
         Validated LLMProxyConfig instance
     """
     if config_path is None:
-        config_path = os.path.join(os.getcwd(), "llmproxy.yaml")
-    
+        config_path = os.getenv("LLMPROXY_CONFIG")
+        if config_path is None:
+            config_path = os.path.join(os.getcwd(), "llmproxy.yaml")
+
     # Check if file exists
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Configuration file not found: {config_path}")

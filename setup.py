@@ -1,26 +1,36 @@
 #!/usr/bin/env python
 
-from setuptools import setup, find_packages
 import os
+
+from setuptools import find_packages, setup
+
 
 # Read the requirements from requirements.txt, excluding development dependencies
 def read_requirements():
     requirements = []
-    if os.path.exists('requirements.txt'):
-        with open('requirements.txt', 'r') as f:
+    if os.path.exists("requirements.txt"):
+        with open("requirements.txt", "r") as f:
             for line in f:
                 line = line.strip()
                 # Skip empty lines, comments, and development dependencies
-                if line and not line.startswith('#') and 'pytest' not in line and 'black' not in line and 'flake8' not in line:
+                if (
+                    line
+                    and not line.startswith("#")
+                    and "pytest" not in line
+                    and "black" not in line
+                    and "flake8" not in line
+                ):
                     requirements.append(line)
     return requirements
 
+
 # Read the README file for long description
 def read_readme():
-    if os.path.exists('README.md'):
-        with open('README.md', 'r', encoding='utf-8') as f:
+    if os.path.exists("README.md"):
+        with open("README.md", "r", encoding="utf-8") as f:
             return f.read()
     return ""
+
 
 setup(
     name="llmproxy",
@@ -54,7 +64,7 @@ setup(
     },
     include_package_data=True,
     package_data={
-        '': ['*.yaml.example'],
+        "": ["*.yaml.example"],
     },
     zip_safe=False,
-) 
+)

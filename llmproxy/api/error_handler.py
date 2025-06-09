@@ -1,12 +1,11 @@
 import asyncio
 import random
-from typing import Optional, Callable, Any, TypeVar
-from pathlib import Path
-import sys
+from typing import Any, Awaitable, Callable, Optional, TypeVar
+
+from llmproxy.core.logger import get_logger
 
 # Imports are handled properly through package structure
 
-from llmproxy.core.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -24,7 +23,11 @@ class RetryHandler:
         self.max_delay = max_delay
 
     async def execute_with_retry(
-        self, func: Callable[..., T], *args, retry_on: Optional[tuple] = None, **kwargs
+        self,
+        func: Callable[..., Awaitable[T]],
+        *args: Any,
+        retry_on: Optional[tuple] = None,
+        **kwargs: Any,
     ) -> T:
         """
         Execute function with exponential backoff retry
@@ -34,12 +37,13 @@ class RetryHandler:
             retry_on: Tuple of exception types to retry on. If None, retry on all exceptions
             *args, **kwargs: Arguments to pass to func
         """
-        last_error = None
+        last_error: Optional[Exception] = None
         retry_on = retry_on or (Exception,)
 
         for attempt in range(self.max_retries):
             try:
-                return await func(*args, **kwargs)
+                result = await func(*args, **kwargs)
+                return result
 
             except retry_on as e:
                 last_error = e
@@ -66,7 +70,10 @@ class RetryHandler:
                     )
 
         # Re-raise the last error
-        raise last_error
+        if last_error:
+            raise last_error
+        else:
+            raise RuntimeError("Unexpected error in retry logic")
 
 
 class APIError(Exception):

@@ -69,4 +69,4 @@ general_settings:
     ttl: 604800 # 7 days
     host: os.environ/REDIS_HOST
     port: os.environ/REDIS_PORT
-    password: os.environ/REDIS_PASSWORD 
+    password: os.environ/REDIS_PASSWORD

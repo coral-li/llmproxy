@@ -154,23 +154,23 @@ general_settings:
 ## 7. User Stories
 
 ### 7.1 Basic Integration
-**As a** developer  
-**I want to** make OpenAI API calls to localhost  
+**As a** developer
+**I want to** make OpenAI API calls to localhost
 **So that** I don't need to manage multiple endpoints in my code
 
 ### 7.2 Automatic Failover
-**As a** developer  
-**I want** my requests to automatically failover when an endpoint fails  
+**As a** developer
+**I want** my requests to automatically failover when an endpoint fails
 **So that** my application remains available during outages
 
 ### 7.3 Cost Optimization
-**As an** engineering manager  
-**I want** LLM traffic routed to cheaper endpoints when possible  
+**As an** engineering manager
+**I want** LLM traffic routed to cheaper endpoints when possible
 **So that** we can reduce our AI infrastructure costs
 
 ### 7.4 Rate Limit Handling
-**As a** developer  
-**I want** the proxy to handle rate limits transparently  
+**As a** developer
+**I want** the proxy to handle rate limits transparently
 **So that** my application never receives 429 errors
 
 ## 8. Acceptance Criteria
@@ -274,4 +274,4 @@ The following features are explicitly out of scope for the MVP:
 
 ### 13.3 Business Risks
 - **Risk**: Upstream API changes break compatibility
-- **Mitigation**: Version pinning and compatibility testing 
+- **Mitigation**: Version pinning and compatibility testing

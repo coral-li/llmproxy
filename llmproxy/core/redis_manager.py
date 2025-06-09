@@ -1,5 +1,7 @@
-import redis.asyncio as redis
 from typing import Optional, Union
+
+import redis.asyncio as redis
+
 from .logger import get_logger
 
 logger = get_logger(__name__)
@@ -17,7 +19,7 @@ class RedisManager:
         self.client: Optional[redis.Redis] = None
         self._pool: Optional[redis.ConnectionPool] = None
 
-    async def connect(self):
+    async def connect(self) -> None:
         """Initialize Redis connection with connection pooling"""
         try:
             self._pool = redis.ConnectionPool(
@@ -38,7 +40,7 @@ class RedisManager:
             logger.error("redis_connection_failed", error=str(e))
             raise
 
-    async def disconnect(self):
+    async def disconnect(self) -> None:
         """Close Redis connection"""
         if self.client:
             await self.client.close()

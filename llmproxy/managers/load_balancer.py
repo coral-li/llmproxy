@@ -1,16 +1,14 @@
-from typing import List, Optional, Dict
-from datetime import datetime
-import random
 import asyncio
-from pathlib import Path
-import sys
+import random
+from typing import Dict, List, Optional, Tuple
+
+from llmproxy.config_model import LLMProxyConfig
+from llmproxy.core.logger import get_logger
+from llmproxy.managers.endpoint_state_manager import EndpointStateManager
+from llmproxy.models.endpoint import Endpoint
 
 # Imports are handled properly through package structure
 
-from llmproxy.models.endpoint import Endpoint, EndpointStatus
-from llmproxy.config_model import LLMProxyConfig, ModelGroup
-from llmproxy.core.logger import get_logger
-from llmproxy.managers.endpoint_state_manager import EndpointStateManager
 
 logger = get_logger(__name__)
 
@@ -18,18 +16,23 @@ logger = get_logger(__name__)
 class LoadBalancer:
     """Stateless load balancer that uses Redis as single source of truth"""
 
-    def __init__(self, cooldown_time: int = 60, allowed_fails: int = 1, state_manager: Optional[EndpointStateManager] = None):
+    def __init__(
+        self,
+        cooldown_time: int = 60,
+        allowed_fails: int = 1,
+        state_manager: Optional[EndpointStateManager] = None,
+    ):
         self.cooldown_time = cooldown_time
         self.allowed_fails = allowed_fails
         self.endpoint_configs: Dict[str, List[Endpoint]] = {}  # Just config, no state
         self.state_manager = state_manager
         self._lock = asyncio.Lock()
 
-    def set_state_manager(self, state_manager: EndpointStateManager):
+    def set_state_manager(self, state_manager: EndpointStateManager) -> None:
         """Set the endpoint state manager after initialization"""
         self.state_manager = state_manager
 
-    async def initialize_from_config(self, config: LLMProxyConfig):
+    async def initialize_from_config(self, config: LLMProxyConfig) -> None:
         """Initialize endpoint configurations and set up Redis state"""
         for model_group in config.model_groups:
             configs = []
@@ -42,11 +45,13 @@ class LoadBalancer:
                     params=model_config.params,
                     allowed_fails=config.general_settings.allowed_fails,
                 )
-                
+
                 # Initialize state in Redis
                 if self.state_manager:
-                    await self.state_manager.initialize_endpoint(endpoint, model_group.model_group)
-                
+                    await self.state_manager.initialize_endpoint(
+                        endpoint, model_group.model_group
+                    )
+
                 configs.append(endpoint)
 
                 logger.info(
@@ -75,41 +80,11 @@ class LoadBalancer:
                 logger.error("no_endpoints_configured", model_group=model_group)
                 return None
 
-            # Check availability from Redis for each endpoint
-            available_endpoints = []
-            primary_available = []
-            fallback_available = []
-            
-            for endpoint_config in configs:
-                is_available = True
-                if self.state_manager:
-                    is_available = await self.state_manager.is_endpoint_available(endpoint_config.id)
-                
-                if is_available:
-                    if endpoint_config.weight > 0:
-                        primary_available.append(endpoint_config)
-                    else:
-                        fallback_available.append(endpoint_config)
-
-            # Log current state from Redis
             if self.state_manager:
-                endpoint_states = []
-                for config in configs:
-                    state = await self.state_manager.get_endpoint_state(config.id)
-                    endpoint_states.append({
-                        "id": config.id,
-                        "base_url": config.base_url,
-                        "weight": config.weight,
-                        "status": state.get("status", "unknown") if state else "unknown",
-                        "is_available": await self.state_manager.is_endpoint_available(config.id),
-                        "consecutive_failures": state.get("consecutive_failures", 0) if state else 0,
-                    })
-                
-                logger.info(
-                    "selecting_endpoint",
-                    model_group=model_group,
-                    endpoints=endpoint_states
-                )
+                await self._log_endpoint_states(configs, model_group)
+            primary_available, fallback_available = await self._get_available_endpoints(
+                configs
+            )
 
             # Use primary endpoints if available
             if primary_available:
@@ -132,7 +107,6 @@ class LoadBalancer:
             if total_weight == 0:
                 selected = random.choice(available_endpoints)
             else:
-                # Weighted random selection
                 rand = random.uniform(0, total_weight)
                 cumulative = 0
 
@@ -155,40 +129,90 @@ class LoadBalancer:
 
             return selected
 
-    async def record_success(self, endpoint: Endpoint):
+    async def _get_available_endpoints(
+        self, configs: List[Endpoint]
+    ) -> Tuple[List[Endpoint], List[Endpoint]]:
+        primary_available = []
+        fallback_available = []
+        for endpoint_config in configs:
+            is_available = True
+            if self.state_manager:
+                is_available = await self.state_manager.is_endpoint_available(
+                    endpoint_config.id
+                )
+            if is_available:
+                if endpoint_config.weight > 0:
+                    primary_available.append(endpoint_config)
+                else:
+                    fallback_available.append(endpoint_config)
+        return primary_available, fallback_available
+
+    async def _log_endpoint_states(
+        self, configs: List[Endpoint], model_group: str
+    ) -> None:
+        endpoint_states = []
+        for config in configs:
+            if self.state_manager:
+                state = await self.state_manager.get_endpoint_state(config.id)
+                is_available = await self.state_manager.is_endpoint_available(config.id)
+                endpoint_states.append(
+                    {
+                        "id": config.id,
+                        "base_url": config.base_url,
+                        "weight": config.weight,
+                        "status": (
+                            state.get("status", "unknown") if state else "unknown"
+                        ),
+                        "is_available": is_available,
+                        "consecutive_failures": (
+                            state.get("consecutive_failures", 0) if state else 0
+                        ),
+                    }
+                )
+        logger.info(
+            "selecting_endpoint",
+            model_group=model_group,
+            endpoints=endpoint_states,
+        )
+
+    async def record_success(self, endpoint: Endpoint) -> None:
         """Record successful request for an endpoint (in Redis)"""
         logger.debug(
             "endpoint_success",
             endpoint_id=endpoint.id,
         )
-        
+
         # Ensure endpoint has proper state first
         if self.state_manager:
-            await self.state_manager.ensure_endpoint_state(endpoint, self._get_model_group_for_endpoint(endpoint))
+            await self.state_manager.ensure_endpoint_state(
+                endpoint, self._get_model_group_for_endpoint(endpoint)
+            )
             await self.state_manager.record_request_outcome(
-                endpoint.id, 
-                success=True, 
-                allowed_fails=self.allowed_fails, 
-                cooldown_time=self.cooldown_time
+                endpoint.id,
+                success=True,
+                allowed_fails=self.allowed_fails,
+                cooldown_time=self.cooldown_time,
             )
 
-    async def record_failure(self, endpoint: Endpoint, error: str):
+    async def record_failure(self, endpoint: Endpoint, error: str) -> None:
         """Record failed request for an endpoint (in Redis)"""
         logger.warning(
             "endpoint_failure",
             endpoint_id=endpoint.id,
             error=error,
         )
-        
+
         # Ensure endpoint has proper state first
         if self.state_manager:
-            await self.state_manager.ensure_endpoint_state(endpoint, self._get_model_group_for_endpoint(endpoint))
+            await self.state_manager.ensure_endpoint_state(
+                endpoint, self._get_model_group_for_endpoint(endpoint)
+            )
             await self.state_manager.record_request_outcome(
-                endpoint.id, 
-                success=False, 
+                endpoint.id,
+                success=False,
                 error=error,
-                allowed_fails=self.allowed_fails, 
-                cooldown_time=self.cooldown_time
+                allowed_fails=self.allowed_fails,
+                cooldown_time=self.cooldown_time,
             )
 
     def _get_model_group_for_endpoint(self, endpoint: Endpoint) -> str:
@@ -202,13 +226,13 @@ class LoadBalancer:
     async def get_all_endpoints_stats(self) -> Dict[str, List[Dict]]:
         """Get statistics for all endpoints (directly from Redis)"""
         stats = {}
-        
+
         if not self.state_manager:
             # Return basic config if no state manager
             for model_group, configs in self.endpoint_configs.items():
                 stats[model_group] = [config.get_config_dict() for config in configs]
             return stats
-        
+
         for model_group, configs in self.endpoint_configs.items():
             endpoint_stats = []
             for config in configs:
@@ -216,13 +240,13 @@ class LoadBalancer:
                 stat_data = await self.state_manager.get_endpoint_stats(config.id)
                 endpoint_stats.append(stat_data)
             stats[model_group] = endpoint_stats
-            
+
         return stats
 
     def get_model_groups(self) -> List[str]:
         """Get list of configured model groups"""
         return list(self.endpoint_configs.keys())
 
-    async def shutdown(self):
+    async def shutdown(self) -> None:
         """Clean shutdown"""
         logger.info("load_balancer_shutdown_complete")

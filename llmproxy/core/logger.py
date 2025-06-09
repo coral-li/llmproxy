@@ -1,6 +1,7 @@
 import logging
 import sys
 from typing import Any
+
 import structlog
 from structlog.stdlib import LoggerFactory
 
@@ -28,7 +29,7 @@ def get_logger(name: str) -> Any:
     return structlog.get_logger(name)
 
 
-def setup_logging(log_level: str = "INFO"):
+def setup_logging(log_level: str = "INFO") -> None:
     """Setup logging configuration"""
     logging.basicConfig(
         format="%(message)s",

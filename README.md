@@ -13,6 +13,7 @@ A high-performance proxy server for Large Language Models (LLMs) that provides i
 - **Multi-Provider Support**: Works with OpenAI and Azure OpenAI endpoints
 - **Health Monitoring**: Track endpoint health and automatically cooldown failed endpoints
 - **Responses API Support**: Full support for OpenAI's new Responses API with conversation state management
+- **Comprehensive test suite with automated setup**: Tests automatically start and stop proxy instances
 
 ## Quick Start
 
@@ -76,22 +77,19 @@ cp env.example .env
 
 1. Start Redis (if not already running):
 ```bash
+# macOS
+brew services start redis
+
+# Linux
+sudo systemctl start redis
+
+# Or manually
 redis-server
 ```
 
 2. Run the proxy:
 ```bash
-# If installed via pip
-llmproxy
-
-# Or with custom config
-llmproxy --config /path/to/your/llmproxy.yaml
-
-# Or with custom host/port
-llmproxy --host 0.0.0.0 --port 8080
-
-# For development setup
-python run_proxy.py
+python -m llmproxy.cli
 ```
 
 The proxy will start on the address and port configured in `llmproxy.yaml` (default: `http://127.0.0.1:5000`).
@@ -216,67 +214,76 @@ LLMProxy uses:
 
 ## Testing
 
-### Running Live Tests
+The test suite now automatically starts and stops proxy instances, eliminating the need to manually start the proxy before running tests.
 
-The `test_proxy_live.py` script tests the proxy with real LLM requests:
+### Prerequisites
+
+- Redis must be running locally on the default port (6379)
+- The `requests` package (included in requirements.txt)
+
+### Running Tests
 
 ```bash
 # Run all tests
-python test_proxy_live.py
+python -m pytest tests/
 
-# Run quick test only
-python test_proxy_live.py --quick
+# Run specific tests
+python -m pytest tests/test_proxy_live_pytest.py::TestProxyLive::test_basic_completion -v
 
-# Test against a different proxy URL
-python test_proxy_live.py --proxy-url http://localhost:8080
+# Run tests with minimal output
+python -m pytest tests/ -v --tb=no
 ```
 
-Tests include:
-- Basic chat completions
-- Streaming responses
-- Caching behavior (including streaming cache)
-- Error handling
-- Load balancing
-- Concurrent requests
-- Health and stats endpoints
+### Test Features
 
-### Testing Streaming Cache
+- **Automated server management**: Tests automatically start mock LLM endpoints and proxy instances
+- **Session-scoped fixtures**: Server startup/shutdown happens once per test session for efficiency
+- **Isolated test environments**: Each test run uses random ports to avoid conflicts
+- **Redis requirement validation**: Tests fail fast if Redis is not available
+- **Comprehensive coverage**: Tests cover basic completions, streaming, caching, load balancing, error handling, and more
 
-Run the streaming cache demo:
+### Test Architecture
 
-```bash
-python demo_streaming_cache.py
-```
+The test setup includes:
 
-This demonstrates how streaming responses are cached and replayed with dramatically reduced latency.
+1. **Mock OpenAI servers**: Lightweight FastAPI servers that simulate OpenAI API endpoints
+2. **Automated proxy startup**: Uses the actual proxy application with test configuration
+3. **Cache management**: Automatic cache clearing between test sessions
+4. **Health monitoring**: Waits for services to be ready before running tests
+
+### Configuration
+
+Tests use `llmproxy.test.yaml` which configures:
+- Mock endpoints on localhost:8001-8003
+- Redis caching with test namespace
+- Reduced timeouts for faster test execution
+
+## Configuration
+
+See `llmproxy.yaml.example` for full configuration options.
 
 ## Development
 
-### Running Unit Tests
+The automated test setup makes development much easier:
 
-```bash
-# Run tests (automatically runs in parallel with -n auto)
-pytest
+1. No need to manually start/stop services
+2. Tests run in isolation with their own proxy instances
+3. Automatic cleanup prevents port conflicts
+4. Fast feedback loop for development
 
-# Run tests serially (disable parallel execution)
-pytest -n 0
+## Requirements
 
-# Run tests in parallel with specific number of workers
-pytest -n 4
+- Python 3.8+
+- Redis server
+- See `requirements.txt` for Python dependencies
 
-# For debugging cache-related issues, run serially
-pytest tests/test_proxy_live_pytest.py -n 0 -v
+## Contributing
 
-# Run all tests except caching tests in parallel (default behavior)
-pytest -k "not (caching or cache)"
-```
+1. Ensure Redis is running
+2. Run the test suite: `python -m pytest tests/`
+3. All tests should pass before submitting changes
 
-### Code Formatting
-
-```bash
-black llmproxy/
-flake8 llmproxy/
-```
+The automated test setup ensures consistent testing across different development environments.
 
 ## License
 

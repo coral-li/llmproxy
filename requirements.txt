@@ -24,7 +24,11 @@ pytest
 pytest-asyncio
 pytest-mock
 pytest-xdist
+pytest-cov
 
 # Development
 black
 flake8
+isort
+mypy
+pre-commit

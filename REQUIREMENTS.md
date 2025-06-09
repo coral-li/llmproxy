@@ -3,13 +3,13 @@
 ## Problem statement
 
 ### Load balancing
-In production applications that are making heavy use of LLMs, we need the ability to distribute the load between endpoints. This includes balancing between different Azure regions that might have different rate limits as well as distributing some of the load to the official OpenAI API. 
+In production applications that are making heavy use of LLMs, we need the ability to distribute the load between endpoints. This includes balancing between different Azure regions that might have different rate limits as well as distributing some of the load to the official OpenAI API.
 
 ### Reliability
 Azure endpoints in particular often have outages and spotty reliability. Handling these errors with retries and fallback to other endpoints in client code introduces complexity and code maintainbility issues.
 
 ### Cost management
-Some providers offer lower prices while offering lower rate limits and lower reliability. That means we need a way to send as much LLM traffic to the cheaper providers while respecting rate limits and handling 429 errors and outages internally. 
+Some providers offer lower prices while offering lower rate limits and lower reliability. That means we need a way to send as much LLM traffic to the cheaper providers while respecting rate limits and handling 429 errors and outages internally.
 
 
 ## Features
@@ -158,7 +158,7 @@ general_settings:
     namespace: "litellm.cache"
     host: os.environ/REDIS_HOST
     port: os.environ/REDIS_PORT
-    password: os.environ/REDIS_PASSWORD 
+    password: os.environ/REDIS_PASSWORD
 ```
 
 ### Loading Config from YAML with env substitution
@@ -171,19 +171,19 @@ import os
 def load_config_from_yaml(yaml_file_path: str) -> LLMProxyConfig:
     """
     Load and validate YAML configuration using the Pydantic model
-    
+
     Args:
         yaml_file_path: Path to the YAML configuration file
-        
+
     Returns:
         Validated LLMProxyConfig instance
     """
     with open(yaml_file_path, 'r') as file:
         yaml_data = yaml.safe_load(file)
-    
+
     # Replace environment variable references with actual values
     yaml_data = resolve_env_vars(yaml_data)
-    
+
     # Create and validate the configuration
     config = LLMProxyConfig(**yaml_data)
     return config
@@ -195,7 +195,7 @@ def resolve_env_vars(data):
     Raises ValueError if any environment variable is not set.
     """
     missing_vars = []
-    
+
     def _resolve(data):
         if isinstance(data, dict):
             return {key: _resolve(value) for key, value in data.items()}
@@ -210,13 +210,13 @@ def resolve_env_vars(data):
             return env_value
         else:
             return data
-    
+
     resolved_data = _resolve(data)
-    
+
     if missing_vars:
         unique_missing = sorted(set(missing_vars))
         raise ValueError(f"The following environment variables are not set: {', '.join(unique_missing)}")
-    
+
     return resolved_data
 ```
 
