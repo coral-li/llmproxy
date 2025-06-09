@@ -1,6 +1,6 @@
 from typing import List, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ModelConfig(BaseModel):
@@ -8,7 +8,8 @@ class ModelConfig(BaseModel):
 
     model: str
     weight: int = 1
-    params: dict = {}  # All OpenAI client parameters go here
+    # Use default_factory to avoid shared mutable default across instances
+    params: dict = Field(default_factory=dict)
 
 
 class ModelGroup(BaseModel):
