@@ -43,7 +43,9 @@ class RedisManager:
     async def disconnect(self) -> None:
         """Close Redis connection"""
         if self.client:
-            await self.client.close()
+            # redis.asyncio.Redis provides an asynchronous aclose() method
+            # close() is synchronous and should not be awaited
+            await self.client.aclose()
             if self._pool:
                 await self._pool.disconnect()
             logger.info("redis_disconnected")
