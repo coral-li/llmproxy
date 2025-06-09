@@ -55,10 +55,14 @@ class ResponseHandler(BaseRequestHandler):
             stream=is_streaming,
         )
 
-        # For streaming, the response is already an async generator
+        # For streaming, check if we got an error dict or a generator
         if is_streaming:
+            # If it's a dict, it's an error response
+            if isinstance(response, dict):
+                return response
+            # Otherwise it's a successful streaming response
             return {
-                "status_code": 200,  # Assume success for now
+                "status_code": 200,
                 "data": response,
                 "headers": {},
             }

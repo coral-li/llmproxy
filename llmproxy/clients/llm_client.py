@@ -65,7 +65,7 @@ class LLMClient:
         )
 
         if stream:
-            return self._stream_request(url, headers, params, request_data)
+            return await self._stream_request(url, headers, params, request_data)
         else:
             return await self._request(url, headers, params, request_data)
 
@@ -263,47 +263,51 @@ class LLMClient:
 
     async def _stream_request(
         self, url: str, headers: dict, params: dict, data: dict
-    ) -> AsyncIterator[str]:
+    ) -> Union[dict, AsyncIterator[str]]:
         """Make streaming request"""
         import time
 
         request_start_time = time.time()
 
+        # Log request details for debugging
+        sanitized_headers = {
+            k: v if k.lower() != "authorization" else "Bearer <REDACTED>"
+            for k, v in headers.items()
+        }
+        logger.debug(
+            "llm_stream_request_start",
+            url=url,
+            headers=sanitized_headers,
+            params=params,
+            model=data.get("model") if data else None,
+        )
+
         try:
-            # Log request details for debugging
-            sanitized_headers = {
-                k: v if k.lower() != "authorization" else "Bearer <REDACTED>"
-                for k, v in headers.items()
-            }
-            logger.debug(
-                "llm_stream_request_start",
-                url=url,
-                headers=sanitized_headers,
-                params=params,
-                model=data.get("model") if data else None,
+            response = self.client.stream(
+                "POST", url, headers=headers, params=params, json=data
             )
 
-            async with self.client.stream(
-                "POST", url, headers=headers, params=params, json=data
-            ) as response:
-                if response.status_code != 200:
-                    error_text = await response.aread()
+            # Check if it's an error by peeking at the response
+            # We'll handle the actual streaming in a wrapper
+            async with response as resp:
+                if resp.status_code != 200:
+                    error_text = await resp.aread()
                     error_details, duration_ms = self._handle_stream_error(
-                        response, error_text, data, request_start_time, url
+                        resp, error_text, data, request_start_time, url
                     )
-                    if response.status_code >= 500:
+                    if resp.status_code >= 500:
                         logger.error(
                             "llm_stream_server_error",
                             **error_details,
                             request_body=data,  # Include full request for 500 errors
                         )
-                    elif response.status_code == 400 and (
+                    elif resp.status_code == 400 and (
                         "check your inputs" in error_text.decode().lower()
                         or "invalid_request_error" in error_text.decode()
                     ):
                         debug_details = {
                             **error_details,
-                            "request_id": response.headers.get("x-request-id"),
+                            "request_id": resp.headers.get("x-request-id"),
                         }
                         if data and "messages" in data:
                             messages_summary = []
@@ -330,20 +334,26 @@ class LLMClient:
                             "llm_stream_error",
                             **error_details,
                         )
-                    error_data = {
-                        "error": {
-                            "message": error_text.decode(),
-                            "type": "api_error",
-                            "code": response.status_code,
-                        }
-                    }
-                    yield f"data: {json.dumps(error_data)}\n\n"
-                    yield "data: [DONE]\n\n"
-                    return
 
-                async for line in response.aiter_lines():
-                    for chunk in self._filter_and_yield_chunk(line):
-                        yield chunk
+                    # Return error dict instead of yielding error chunks
+                    return {
+                        "status_code": resp.status_code,
+                        "headers": dict(resp.headers),
+                        "data": None,
+                        "error": error_text.decode(),
+                        "duration_ms": duration_ms,
+                    }
+
+            # Success - return a generator that manages its own context
+            async def stream_response() -> AsyncIterator[str]:
+                async with self.client.stream(
+                    "POST", url, headers=headers, params=params, json=data
+                ) as response:
+                    async for line in response.aiter_lines():
+                        for chunk in self._filter_and_yield_chunk(line):
+                            yield chunk
+
+            return stream_response()
 
         except httpx.TimeoutException:
             duration_ms = int((time.time() - request_start_time) * 1000)
@@ -354,15 +364,14 @@ class LLMClient:
                 duration_ms=duration_ms,
                 request_model=data.get("model") if data else None,
             )
-            error_data = {
-                "error": {
-                    "message": f"Request timeout after {self.timeout}s",
-                    "type": "timeout_error",
-                    "code": 504,
-                }
+            # Return error dict for timeout
+            return {
+                "status_code": 504,
+                "headers": {},
+                "data": None,
+                "error": f"Request timeout after {self.timeout}s",
+                "duration_ms": duration_ms,
             }
-            yield f"data: {json.dumps(error_data)}\n\n"
-            yield "data: [DONE]\n\n"
 
         except Exception as e:
             duration_ms = int((time.time() - request_start_time) * 1000)
@@ -374,11 +383,14 @@ class LLMClient:
                 duration_ms=duration_ms,
                 request_model=data.get("model") if data else None,
             )
-            error_data = {
-                "error": {"message": str(e), "type": "client_error", "code": 500}
+            # Return error dict for exceptions
+            return {
+                "status_code": 500,
+                "headers": {},
+                "data": None,
+                "error": str(e),
+                "duration_ms": duration_ms,
             }
-            yield f"data: {json.dumps(error_data)}\n\n"
-            yield "data: [DONE]\n\n"
 
     def _handle_stream_error(
         self,
@@ -470,70 +482,98 @@ class LLMClient:
         )
 
         if stream:
-            return self._stream_response_request(url, headers, params, request_data)
+            return await self._stream_response_request(
+                url, headers, params, request_data
+            )
         else:
             return await self._request(url, headers, params, request_data)
 
     async def _stream_response_request(
         self, url: str, headers: dict, params: dict, data: dict
-    ) -> AsyncIterator[str]:
+    ) -> Union[dict, AsyncIterator[str]]:
         """Make streaming request for Responses API"""
+        import time
+
+        request_start_time = time.time()
+
         try:
-            async with self.client.stream(
+            response = self.client.stream(
                 "POST", url, headers=headers, params=params, json=data
-            ) as response:
-                # For streaming, we need to check status before yielding
-                if response.status_code != 200:
-                    error_text = await response.aread()
+            )
+
+            # Check if it's an error by peeking at the response
+            async with response as resp:
+                if resp.status_code != 200:
+                    error_text = await resp.aread()
+                    duration_ms = int((time.time() - request_start_time) * 1000)
                     logger.error(
                         "llm_response_stream_error",
-                        status_code=response.status_code,
+                        status_code=resp.status_code,
                         error=error_text.decode()[:500],
+                        duration_ms=duration_ms,
                     )
 
-                    # Yield error in SSE format
-                    error_data = {
-                        "error": {
-                            "message": error_text.decode(),
-                            "type": "api_error",
-                            "code": response.status_code,
-                        }
+                    # Return error dict instead of yielding error chunks
+                    return {
+                        "status_code": resp.status_code,
+                        "headers": dict(resp.headers),
+                        "data": None,
+                        "error": error_text.decode(),
+                        "duration_ms": duration_ms,
                     }
-                    yield f"data: {json.dumps(error_data)}\n\n"
-                    yield "data: [DONE]\n\n"
-                    return
 
-                # Stream the response line by line for proper event parsing
-                # The responses API uses event-based SSE format that needs line-by-line processing
-                async for line in response.aiter_lines():
-                    # Yield each line with proper newline formatting
-                    if line:
-                        # Non-empty lines get a single newline
-                        yield line + "\n"
-                    else:
-                        # Empty lines indicate event boundary, add another newline
-                        yield "\n"
+            # Success - return a generator that manages its own context
+            async def stream_response() -> AsyncIterator[str]:
+                async with self.client.stream(
+                    "POST", url, headers=headers, params=params, json=data
+                ) as response:
+                    # Stream the response line by line for proper event parsing
+                    # The responses API uses event-based SSE format that needs line-by-line processing
+                    async for line in response.aiter_lines():
+                        # Yield each line with proper newline formatting
+                        if line:
+                            # Non-empty lines get a single newline
+                            yield line + "\n"
+                        else:
+                            # Empty lines indicate event boundary, add another newline
+                            yield "\n"
 
-                    # Log event lines for debugging
-                    if line.startswith("event: "):
-                        logger.debug("response_api_event_line", event_line=line)
+                        # Log event lines for debugging
+                        if line.startswith("event: "):
+                            logger.debug("response_api_event_line", event_line=line)
+
+            return stream_response()
 
         except httpx.TimeoutException:
-            logger.error("llm_response_stream_timeout", url=url, timeout=self.timeout)
-            error_data = {
-                "error": {
-                    "message": f"Request timeout after {self.timeout}s",
-                    "type": "timeout_error",
-                    "code": 504,
-                }
+            duration_ms = int((time.time() - request_start_time) * 1000)
+            logger.error(
+                "llm_response_stream_timeout",
+                url=url,
+                timeout=self.timeout,
+                duration_ms=duration_ms,
+            )
+            # Return error dict for timeout
+            return {
+                "status_code": 504,
+                "headers": {},
+                "data": None,
+                "error": f"Request timeout after {self.timeout}s",
+                "duration_ms": duration_ms,
             }
-            yield f"data: {json.dumps(error_data)}\n\n"
-            yield "data: [DONE]\n\n"
 
         except Exception as e:
-            logger.error("llm_response_stream_exception", url=url, error=str(e))
-            error_data = {
-                "error": {"message": str(e), "type": "client_error", "code": 500}
+            duration_ms = int((time.time() - request_start_time) * 1000)
+            logger.error(
+                "llm_response_stream_exception",
+                url=url,
+                error=str(e),
+                duration_ms=duration_ms,
+            )
+            # Return error dict for exceptions
+            return {
+                "status_code": 500,
+                "headers": {},
+                "data": None,
+                "error": str(e),
+                "duration_ms": duration_ms,
             }
-            yield f"data: {json.dumps(error_data)}\n\n"
-            yield "data: [DONE]\n\n"
