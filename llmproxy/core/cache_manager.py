@@ -621,7 +621,12 @@ class StreamingCacheWriter:
             is_empty_line=chunk.strip() == "",
             is_completion=chunk.strip() == "event: response.completed",
         )
-        if chunk.strip() == "" or chunk.strip() == "event: response.completed":
+        # SSE events are separated by a blank line. Previously we also flushed
+        # when the `event: response.completed` line was seen, which caused the
+        # final event to be processed before its data line arrived. This
+        # resulted in missing completion metadata in the cache.  We now flush
+        # only when we see the blank line that terminates the event.
+        if chunk.strip() == "":
             full_event = "\n".join(self.buffered_lines)
             logger.debug(
                 "responses_api_processing_event",
