@@ -78,11 +78,8 @@ class BaseRequestHandler(ABC):
         self, request_data: dict, is_streaming: bool, start_time: float, model: str
     ) -> Optional[Union[Dict[Any, Any], StreamingResponse]]:
         """Check cache for existing response"""
-        # Only check cache if globally enabled AND not disabled per-request
-        if not self.config.general_settings.cache:
-            return None
-
-        if not self.cache_manager._should_cache(request_data):
+        # Short-circuit if caching is disabled for this request or globally.
+        if not self._is_cache_enabled(request_data):
             return None
 
         if is_streaming:
@@ -129,8 +126,7 @@ class BaseRequestHandler(ABC):
         if (
             not is_streaming
             and response.get("status_code") == 200
-            and self.config.general_settings.cache
-            and self.cache_manager._should_cache(request_data)
+            and self._is_cache_enabled(request_data)
         ):
             await self.cache_manager.set(request_data, response["data"])
 
@@ -247,9 +243,7 @@ class BaseRequestHandler(ABC):
     ) -> StreamingResponse:
         """Build streaming response with caching support"""
         # Only cache if globally enabled AND not disabled per-request
-        if self.config.general_settings.cache and self.cache_manager._should_cache(
-            request_data
-        ):
+        if self._is_cache_enabled(request_data):
             cache_writer = await self.cache_manager.create_streaming_cache_writer(
                 request_data
             )
@@ -331,12 +325,23 @@ class BaseRequestHandler(ABC):
         await self.load_balancer.record_failure(endpoint, str(e))
 
         if is_streaming:
+            import json
+
             error_message = str(e)
 
             async def error_stream() -> AsyncGenerator[bytes, None]:
-                yield f'data: {{"error": {{"message": "{error_message}", "type": "proxy_error"}}}}\n\n'.encode(
-                    "utf-8"
+                # Emit a JSON-encoded error object followed by the sentinel [DONE].
+                payload = json.dumps(
+                    {
+                        "error": {
+                            "message": error_message,
+                            "type": "proxy_error",
+                        }
+                    }
                 )
+                # First SSE event with the error payload
+                yield f"data: {payload}\n\n".encode("utf-8")
+                # Final sentinel indicating stream completion
                 yield "data: [DONE]\n\n".encode("utf-8")
 
             return {"status_code": 500, "data": error_stream()}
@@ -367,3 +372,13 @@ class BaseRequestHandler(ABC):
     ) -> dict:
         """Make request to a specific endpoint"""
         pass
+
+    # ---------------------------------------------------------------------
+    # Helper utilities
+    # ---------------------------------------------------------------------
+
+    def _is_cache_enabled(self, request_data: dict) -> bool:
+        """Return True if global and per-request caching are both enabled."""
+        return self.config.general_settings.cache and self.cache_manager._should_cache(
+            request_data
+        )
