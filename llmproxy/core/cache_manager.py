@@ -120,6 +120,8 @@ class CacheManager:
         if not cache_control:
             # Check extra_body for cache control
             extra_body = request_data.get("extra_body", {})
+            if not isinstance(extra_body, dict):
+                extra_body = {}
             cache_control = extra_body.get("cache")
 
         logger.debug(
