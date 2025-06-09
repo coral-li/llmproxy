@@ -2,10 +2,10 @@ import asyncio
 import json
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
-import subprocess
 from pathlib import Path
 from typing import Generator, Optional
 
@@ -368,8 +368,9 @@ class LLMProxyTestServer:
 
     def _check_redis(self):
         """Ensure Redis is running, start local instance if needed"""
-        import redis
         from shutil import which
+
+        import redis
 
         r = redis.Redis(host="localhost", port=6379, decode_responses=True)
         try:
