@@ -57,6 +57,11 @@ class MockOpenAIServer:
         user_message, is_responses_api = self._extract_user_message(body, request)
         response_content = self._select_response_content(user_message)
 
+        # Simulate network latency for non-streaming requests as well to
+        # ensure caching provides a measurable speed improvement.
+        if not is_streaming:
+            await asyncio.sleep(0.1)
+
         if is_responses_api:
             if is_streaming:
                 return StreamingResponse(
