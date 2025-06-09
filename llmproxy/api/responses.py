@@ -171,11 +171,27 @@ class ResponseHandler:
         last_response = None
 
         for attempt in range(self.config.general_settings.num_retries):
-            endpoint = await self.load_balancer.select_endpoint(model_group)
+            # Try to find an endpoint that hasn't been attempted yet
+            endpoint = None
+            max_selection_attempts = 10  # Prevent infinite loop
+            for _ in range(max_selection_attempts):
+                candidate = await self.load_balancer.select_endpoint(model_group)
+                if not candidate:
+                    return self._no_endpoint_response(model_group)
+                if candidate.id not in attempted_endpoints:
+                    endpoint = candidate
+                    break
+
             if not endpoint:
-                return self._no_endpoint_response(model_group)
-            if endpoint.id in attempted_endpoints:
-                continue
+                # All available endpoints have been attempted
+                logger.warning(
+                    "all_available_endpoints_attempted",
+                    model_group=model_group,
+                    attempted_count=len(attempted_endpoints),
+                    attempt=attempt + 1,
+                )
+                break
+
             attempted_endpoints.add(endpoint.id)
             try:
                 response = await self._make_request(
