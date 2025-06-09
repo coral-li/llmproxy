@@ -3,10 +3,8 @@ import json
 import os
 import socket
 import subprocess
-import sys
 import threading
 import time
-from pathlib import Path
 from typing import Generator, Optional
 
 import pytest  # noqa: E402
@@ -17,9 +15,6 @@ from fastapi.responses import StreamingResponse  # noqa: E402
 from openai import AsyncOpenAI, OpenAI  # noqa: E402
 
 from llmproxy.main import app  # noqa: E402
-
-# Add the project root to Python path before other imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 def find_free_port() -> int:

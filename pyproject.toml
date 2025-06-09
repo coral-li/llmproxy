@@ -63,6 +63,15 @@ module = [
     "redis.*",
     "hiredis.*",
     "structlog.*",
+    "traitlets.*",
+    "trio.*",
+    "anyio.*",
+    "dotenv.*",
+    "httpcore.*",
+    "uvicorn.*",
+    "websockets.*",
+    "fastapi.*",
+    "orjson.*",
 ]
 ignore_missing_imports = true
 
