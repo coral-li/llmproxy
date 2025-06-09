@@ -28,20 +28,12 @@ repos:
       - id: flake8
         args: ["--ignore=D100,D101,D102,D103,D105,D107,D202,D205,D212,D415,E402,F401,F541,E226"]
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.8.0
+  - repo: local
     hooks:
       - id: mypy
-        additional_dependencies: [
-          types-PyYAML,
-          types-redis,
-          pydantic,
-          fastapi,
-          httpx,
-          uvicorn,
-          python-dotenv,
-          redis
-        ]
-        args: ["--no-warn-unused-ignores"]
+        name: mypy
+        entry: mypy
+        language: system
+        types: [python]
         files: ^llmproxy/
         exclude: ^(tests/|setup.py)
