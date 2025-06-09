@@ -36,8 +36,11 @@ known_third_party = [
     "redis",
     "pytest",
     "structlog",
+    "requests",
 ]
 skip_glob = ["*/migrations/*"]
+ensure_newline_before_comments = true
+float_to_top = true
 
 [tool.mypy]
 python_version = "3.8"

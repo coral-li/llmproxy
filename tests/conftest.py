@@ -2,15 +2,12 @@ import asyncio
 import json
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
-import subprocess
 from pathlib import Path
 from typing import Generator, Optional
-
-# Add the project root to Python path before other imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest  # noqa: E402
 import requests  # noqa: E402
@@ -20,6 +17,9 @@ from fastapi.responses import StreamingResponse  # noqa: E402
 from openai import AsyncOpenAI, OpenAI  # noqa: E402
 
 from llmproxy.main import app  # noqa: E402
+
+# Add the project root to Python path before other imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 def find_free_port() -> int:
@@ -368,8 +368,9 @@ class LLMProxyTestServer:
 
     def _check_redis(self):
         """Ensure Redis is running, start local instance if needed"""
-        import redis
         from shutil import which
+
+        import redis
 
         r = redis.Redis(host="localhost", port=6379, decode_responses=True)
         try:
