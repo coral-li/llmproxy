@@ -2,6 +2,82 @@
 requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "llmproxy"
+version = "0.1.0"
+description = "An intelligent load balancer and proxy for LLM APIs"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "LLMProxy Contributors"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "pydantic-settings",
+    "httpx",
+    "openai",
+    "requests",
+    "pyyaml",
+    "python-dotenv",
+    "structlog",
+    "redis",
+    "hiredis",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-mock",
+    "pytest-xdist",
+    "pytest-cov",
+    "black==24.3.0",
+    "flake8==7.0.0",
+    "isort==5.13.2",
+    "mypy==1.8.0",
+    "types-PyYAML",
+    "pre-commit",
+]
+test = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-mock",
+    "pytest-xdist",
+    "pytest-cov",
+]
+lint = [
+    "black==24.3.0",
+    "flake8==7.0.0",
+    "isort==5.13.2",
+    "mypy==1.8.0",
+    "types-PyYAML",
+    "pre-commit",
+]
+
+[project.scripts]
+llmproxy = "llmproxy.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/llmproxy"
+Repository = "https://github.com/yourusername/llmproxy.git"
+Issues = "https://github.com/yourusername/llmproxy/issues"
+
 [tool.black]
 line-length = 88
 target-version = ['py38', 'py39', 'py310', 'py311']
