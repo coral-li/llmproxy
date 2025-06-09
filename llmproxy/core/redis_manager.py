@@ -33,6 +33,7 @@ class RedisManager:
             self.client = redis.Redis(connection_pool=self._pool)
 
             # Test connection
+            assert self.client is not None  # mypy: Redis constructor cannot return None
             await self.client.ping()
             logger.info("redis_connected", host=self.host, port=self.port)
 
@@ -43,9 +44,11 @@ class RedisManager:
     async def disconnect(self) -> None:
         """Close Redis connection"""
         if self.client:
-            # redis.asyncio.Redis provides an asynchronous aclose() method
-            # close() is synchronous and should not be awaited
-            await self.client.aclose()
+            # Close Redis client (handles both newer aclose() and older close() methods)
+            if hasattr(self.client, "aclose"):
+                await self.client.aclose()
+            else:
+                await self.client.close()
             if self._pool:
                 await self._pool.disconnect()
             logger.info("redis_disconnected")
@@ -53,7 +56,7 @@ class RedisManager:
     async def health_check(self) -> bool:
         """Check if Redis is healthy"""
         try:
-            if self.client:
+            if self.client is not None:
                 await self.client.ping()
                 return True
             return False

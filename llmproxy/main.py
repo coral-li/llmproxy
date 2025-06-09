@@ -6,7 +6,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 
-import redis.asyncio as redis
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -25,7 +24,7 @@ logger = get_logger(__name__)
 
 # Global state
 load_balancer: Optional[LoadBalancer] = None
-redis_client: Optional[redis.Redis] = None
+redis_manager: Optional[RedisManager] = None
 cache_manager: Optional[CacheManager] = None
 llm_client: Optional[LLMClient] = None
 endpoint_state_manager: Optional[EndpointStateManager] = None
@@ -44,7 +43,7 @@ class HealthResponse(BaseModel):
     model_groups: list
 
 
-async def init_redis(config: Any) -> Tuple[redis.Redis, EndpointStateManager]:
+async def init_redis(config: Any) -> Tuple[RedisManager, EndpointStateManager]:
     """Initialize Redis connection and endpoint state manager."""
     redis_settings = config.general_settings
     redis_manager = RedisManager(
@@ -62,7 +61,7 @@ async def init_redis(config: Any) -> Tuple[redis.Redis, EndpointStateManager]:
         state_ttl=7200,  # 2 hours default
     )
 
-    return redis_client, endpoint_state_manager
+    return redis_manager, endpoint_state_manager
 
 
 async def shutdown_handler(signum: int, frame: Any) -> None:
@@ -70,9 +69,9 @@ async def shutdown_handler(signum: int, frame: Any) -> None:
     logger.info("received_shutdown_signal", signal=signum)
 
     # Perform cleanup here
-    if redis_client:
-        # Use aclose() to properly close the async Redis client
-        await redis_client.aclose()
+    if redis_manager:
+        # Use RedisManager's disconnect method for proper cleanup
+        await redis_manager.disconnect()
 
     sys.exit(0)
 
@@ -80,7 +79,7 @@ async def shutdown_handler(signum: int, frame: Any) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan manager."""
-    global load_balancer, redis_client, cache_manager, llm_client, endpoint_state_manager, config
+    global load_balancer, redis_manager, cache_manager, llm_client, endpoint_state_manager, config
 
     # Startup
     logger.info("application_startup")
@@ -92,7 +91,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Initialize Redis and endpoint state manager
     try:
-        redis_client, endpoint_state_manager = await init_redis(config)
+        redis_manager, endpoint_state_manager = await init_redis(config)
         logger.info("redis_initialized")
     except Exception as e:
         logger.error("redis_initialization_failed", error=str(e))
@@ -104,7 +103,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         cache_ttl = config.general_settings.cache_params.ttl
 
     cache_manager = CacheManager(
-        redis_client=redis_client,
+        redis_client=redis_manager.get_client(),
         ttl=cache_ttl,
         namespace="llmproxy",
         cache_enabled=config.general_settings.cache,
@@ -139,9 +138,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Cleanup
     logger.info("application_shutdown")
-    if redis_client:
-        # Use aclose() to properly close the async Redis client
-        await redis_client.aclose()
+    if redis_manager:
+        # Use RedisManager's disconnect method for proper cleanup
+        await redis_manager.disconnect()
 
 
 app = FastAPI(
@@ -155,19 +154,15 @@ app = FastAPI(
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     """Health check endpoint."""
-    global load_balancer, redis_client, endpoint_state_manager  # noqa: F824
+    global load_balancer, redis_manager, endpoint_state_manager  # Updated: use redis_manager
 
     redis_connected = False
     state_sharing_enabled = False
     endpoints_configured = 0
     model_groups = []
 
-    if redis_client:
-        try:
-            await redis_client.ping()
-            redis_connected = True
-        except Exception:
-            pass
+    if redis_manager:
+        redis_connected = await redis_manager.health_check()
 
     if endpoint_state_manager:
         state_sharing_enabled = await endpoint_state_manager.health_check()
@@ -238,13 +233,14 @@ async def llm_proxy_exception_handler(
 @app.delete("/cache")
 async def clear_cache() -> Dict[str, Any]:
     """Clear all cache entries (for testing)."""
-    if not redis_client:
+    if not redis_manager:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Redis not available",
         )
 
     try:
+        redis_client = redis_manager.get_client()
         # Get all keys in the cache namespace
         keys = await redis_client.keys("llmproxy:*")
 
