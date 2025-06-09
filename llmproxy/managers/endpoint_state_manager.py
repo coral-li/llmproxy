@@ -84,7 +84,7 @@ class EndpointStateManager:
         allowed_fails: int = 1,
         cooldown_time: int = 60,
     ) -> None:
-        """Record a request outcome and update endpoint state atomically"""
+        """Record a request outcome and update endpoint state atomically"""  # noqa: C901
         try:
             key = self._get_endpoint_key(endpoint_id)
 
@@ -115,13 +115,47 @@ class EndpointStateManager:
                     "updated_at": datetime.utcnow().isoformat(),
                 }
             else:
-                state_data = json.loads(current_data)
+                try:
+                    state_data = json.loads(current_data)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "endpoint_state_corrupted_creating_default",
+                        endpoint_id=endpoint_id,
+                    )
+                    # Create default state if JSON is corrupted
+                    state_data = {
+                        "id": endpoint_id,
+                        "model": "unknown",
+                        "weight": 1,
+                        "base_url": "unknown",
+                        "is_azure": False,
+                        "allowed_fails": allowed_fails,
+                        "status": "healthy",
+                        "total_requests": 0,
+                        "failed_requests": 0,
+                        "consecutive_failures": 0,
+                        "last_error": None,
+                        "last_error_time": None,
+                        "last_success_time": None,
+                        "cooldown_until": None,
+                        "created_at": datetime.utcnow().isoformat(),
+                        "updated_at": datetime.utcnow().isoformat(),
+                    }
 
-            # Update counters
+            # Update counters with safe conversion
+            def safe_int_conversion(value: Any, default: int = 0) -> int:
+                """Safely convert value to int, returning default if conversion fails"""
+                if isinstance(value, int):
+                    return value
+                if isinstance(value, str):
+                    try:
+                        return int(value)
+                    except ValueError:
+                        return default
+                return default
+
             total_requests = state_data.get("total_requests", 0)
-            total_requests_int = (
-                int(total_requests) if isinstance(total_requests, (int, str)) else 0
-            )
+            total_requests_int = safe_int_conversion(total_requests, 0)
             state_data["total_requests"] = total_requests_int + 1
 
             if success:
@@ -133,19 +167,11 @@ class EndpointStateManager:
             else:
                 # Failure: increment counters, check for cooldown
                 failed_requests = state_data.get("failed_requests", 0)
-                failed_requests_int = (
-                    int(failed_requests)
-                    if isinstance(failed_requests, (int, str))
-                    else 0
-                )
+                failed_requests_int = safe_int_conversion(failed_requests, 0)
                 state_data["failed_requests"] = failed_requests_int + 1
 
                 consecutive_failures = state_data.get("consecutive_failures", 0)
-                consecutive_failures_int = (
-                    int(consecutive_failures)
-                    if isinstance(consecutive_failures, (int, str))
-                    else 0
-                )
+                consecutive_failures_int = safe_int_conversion(consecutive_failures, 0)
                 state_data["consecutive_failures"] = consecutive_failures_int + 1
 
                 state_data["last_error"] = error
@@ -153,11 +179,7 @@ class EndpointStateManager:
 
                 # Check if we should enter cooldown
                 current_failures_val = state_data["consecutive_failures"]
-                current_failures = (
-                    int(current_failures_val)
-                    if isinstance(current_failures_val, (int, str))
-                    else 0
-                )
+                current_failures = safe_int_conversion(current_failures_val, 0)
                 if current_failures >= allowed_fails:
                     state_data["status"] = "cooling_down"
                     cooldown_until = datetime.utcnow() + timedelta(
@@ -201,9 +223,19 @@ class EndpointStateManager:
             elif status == "cooling_down":
                 cooldown_until_str = state_data.get("cooldown_until")
                 if cooldown_until_str:
-                    cooldown_until = datetime.fromisoformat(cooldown_until_str)
-                    if datetime.utcnow() > cooldown_until:
-                        # Cooldown expired, mark as healthy
+                    try:
+                        cooldown_until = datetime.fromisoformat(cooldown_until_str)
+                        if datetime.utcnow() > cooldown_until:
+                            # Cooldown expired, mark as healthy
+                            await self._mark_endpoint_healthy(endpoint_id)
+                            return True
+                    except ValueError:
+                        logger.warning(
+                            "endpoint_malformed_cooldown_timestamp",
+                            endpoint_id=endpoint_id,
+                            cooldown_until=cooldown_until_str,
+                        )
+                        # Treat malformed timestamp as expired cooldown
                         await self._mark_endpoint_healthy(endpoint_id)
                         return True
                 return False

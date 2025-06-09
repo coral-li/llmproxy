@@ -61,7 +61,10 @@ class LLMClient:
             url = urljoin(endpoint_url + "/", "v1/chat/completions")
 
         logger.debug(
-            "llm_request", url=url, model=request_data.get("model"), stream=stream
+            "llm_request",
+            url=url,
+            model=request_data.get("model") if request_data else None,
+            stream=stream,
         )
 
         if stream:
@@ -102,7 +105,27 @@ class LLMClient:
             error = None
 
             if response.status_code == 200:
-                response_data = response.json()
+                try:
+                    response_data = response.json()
+                except json.JSONDecodeError as json_error:
+                    # Handle JSON decode error
+                    error = response.text
+                    logger.error(
+                        "llm_request_json_decode_error",
+                        url=url,
+                        status_code=response.status_code,
+                        json_error=str(json_error),
+                        response_text=error[:500],  # First 500 chars
+                        duration_ms=request_duration_ms,
+                    )
+                    return {
+                        "status_code": 500,
+                        "headers": dict(response.headers),
+                        "data": None,
+                        "error": error,
+                        "duration_ms": request_duration_ms,
+                    }
+
                 logger.debug(
                     "llm_request_success",
                     url=url,
@@ -420,6 +443,8 @@ class LLMClient:
             try:
                 data_str = line[6:]
                 chunk_data = json.loads(data_str)
+                if chunk_data is None or not isinstance(chunk_data, dict):
+                    return []
                 if "choices" in chunk_data and len(chunk_data["choices"]) == 0:
                     logger.debug("Filtering out chunk with empty choices array")
                     return []
