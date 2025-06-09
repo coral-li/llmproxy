@@ -242,6 +242,13 @@ async def clear_cache() -> Dict[str, Any]:
 
 
 # Dependency functions that ensure non-None returns
+def get_load_balancer_required() -> LoadBalancer:
+    """Get load balancer with validation."""
+    if load_balancer is None:
+        raise HTTPException(status_code=503, detail="Load balancer not initialized")
+    return load_balancer
+
+
 def get_cache_manager_required() -> CacheManager:
     """Get cache manager with validation."""
     if cache_manager is None:
@@ -266,7 +273,7 @@ def get_config_required() -> Any:
 # Include API routes with /v1 prefix
 app.include_router(
     create_router(
-        get_load_balancer=lambda: load_balancer or LoadBalancer(),
+        get_load_balancer=get_load_balancer_required,
         cache_manager=get_cache_manager_required,
         llm_client=get_llm_client_required,
         config=get_config_required,
@@ -277,7 +284,7 @@ app.include_router(
 # Also include routes without prefix for direct access
 app.include_router(
     create_router(
-        get_load_balancer=lambda: load_balancer or LoadBalancer(),
+        get_load_balancer=get_load_balancer_required,
         cache_manager=get_cache_manager_required,
         llm_client=get_llm_client_required,
         config=get_config_required,
@@ -313,10 +320,20 @@ def main() -> None:
     setup_logging()
 
     try:
+        # Load configuration to get proper host and port
+        config_path = os.getenv("LLMPROXY_CONFIG", "llmproxy.yaml")
+        config = load_config(config_path)
+
+        # Use configured bind address and port
+        host = config.general_settings.bind_address
+        port = config.general_settings.bind_port
+
+        logger.info("starting_server", host=host, port=port, config_path=config_path)
+
         uvicorn.run(
             "llmproxy.main:app",
-            host="0.0.0.0",
-            port=4243,
+            host=host,
+            port=port,
             log_config=None,  # Use our custom logging
         )
     except KeyboardInterrupt:
