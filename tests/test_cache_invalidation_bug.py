@@ -52,22 +52,23 @@ async def test_invalidate_request_works_normally():
     # Should return True on success
     assert result is True
 
-    # Should have checked for existence of cache keys
-    assert (
-        mock_redis.exists.call_count == 4
-    )  # regular, stream, responses_stream, responses_normalized
+    # Should not check for existence (atomic delete operations)
+    assert mock_redis.exists.call_count == 0
 
-    # Should have deleted existing keys
-    assert mock_redis.delete.call_count == 4
+    # Should have attempted to delete all 4 key types in a single call
+    mock_redis.delete.assert_called_once()
+    # Verify that 4 keys were passed to delete()
+    args, _ = mock_redis.delete.call_args
+    assert len(args) == 4
 
 
 @pytest.mark.asyncio
 async def test_invalidate_request_handles_redis_error():
     """Test that invalidate_request handles Redis errors gracefully"""
 
-    # Mock Redis client that raises error on exists()
+    # Mock Redis client that raises an error on delete()
     mock_redis = mock.AsyncMock()
-    mock_redis.exists.side_effect = Exception("Redis connection failed")
+    mock_redis.delete.side_effect = Exception("Redis connection failed")
 
     # Create cache manager
     cache_manager = CacheManager(mock_redis)
