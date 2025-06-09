@@ -6,7 +6,7 @@ tries different endpoints instead of wasting retry attempts on the same
 failed endpoint.
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
