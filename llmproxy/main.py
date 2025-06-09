@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -315,8 +316,9 @@ def main() -> None:
     """Main entry point for uvicorn."""
     import uvicorn
 
-    # Set up logging first
-    setup_logging()
+    # Set up logging first (only if not already configured)
+    if not logging.getLogger().hasHandlers():
+        setup_logging()
 
     try:
         # Load configuration to get proper host and port

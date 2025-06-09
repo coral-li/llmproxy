@@ -9,6 +9,7 @@ import uvicorn
 from dotenv import load_dotenv
 
 from llmproxy.config.config_loader import load_config
+from llmproxy.core.logger import setup_logging
 
 
 def main() -> None:
@@ -33,6 +34,9 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    # Setup logging with the specified level
+    setup_logging(args.log_level)
 
     # Load environment variables from .env file if it exists
     if os.path.exists(".env"):
