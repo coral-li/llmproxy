@@ -429,13 +429,13 @@ class CacheManager:
             responses_stream_key = f"{key}:responses_stream"
             responses_normalized_key = f"{responses_stream_key}:normalized"
 
-            # Use atomic delete operations to avoid race conditions
-            # Redis delete returns the number of keys that were actually deleted
-            deleted = 0
-            deleted += await self.redis.delete(regular_key)
-            deleted += await self.redis.delete(streaming_key)
-            deleted += await self.redis.delete(responses_stream_key)
-            deleted += await self.redis.delete(responses_normalized_key)
+            # Use a single atomic delete call for all keys (fewer round-trips)
+            deleted = await self.redis.delete(
+                regular_key,
+                streaming_key,
+                responses_stream_key,
+                responses_normalized_key,
+            )
 
             if deleted > 0:
                 logger.info(

@@ -1,5 +1,5 @@
 import time
-from typing import Any, AsyncGenerator, Dict, Optional, Union
+from typing import Any, AsyncGenerator, Dict, Optional, Set, Union
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
@@ -162,18 +162,24 @@ class ResponseHandler:
         self,
         model_group: str,
         request_data: dict,
-        attempted_endpoints: Optional[set] = None,
     ) -> Union[Dict[Any, Any], StreamingResponse]:
         """Execute request with automatic failover on errors"""
 
-        attempted_endpoints = attempted_endpoints or set()
+        attempted_endpoints: Set[str] = set()
+
+        endpoint_pool = getattr(self.load_balancer, "endpoint_configs", {})
+        if isinstance(endpoint_pool, dict):
+            total_endpoints = len(endpoint_pool.get(model_group, []))
+        else:
+            total_endpoints = 0
+        max_selection_attempts = max(10, total_endpoints * 2)
+
         is_streaming = request_data.get("stream", False)
         last_response = None
 
         for attempt in range(self.config.general_settings.num_retries):
             # Try to find an endpoint that hasn't been attempted yet
             endpoint = None
-            max_selection_attempts = 10  # Prevent infinite loop
             for _ in range(max_selection_attempts):
                 candidate = await self.load_balancer.select_endpoint(model_group)
                 if not candidate:
