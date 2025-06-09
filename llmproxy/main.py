@@ -1,6 +1,5 @@
 import asyncio
 import os
-import signal
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -64,18 +63,6 @@ async def init_redis(config: Any) -> Tuple[RedisManager, EndpointStateManager]:
     return redis_manager, endpoint_state_manager
 
 
-async def shutdown_handler(signum: int, frame: Any) -> None:
-    """Handle shutdown signals gracefully."""
-    logger.info("received_shutdown_signal", signal=signum)
-
-    # Perform cleanup here
-    if redis_manager:
-        # Use RedisManager's disconnect method for proper cleanup
-        await redis_manager.disconnect()
-
-    sys.exit(0)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan manager."""
@@ -123,16 +110,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await load_balancer.initialize_from_config(config)
     logger.info("load_balancer_initialized")
 
-    # Setup signal handlers for graceful shutdown (only in main thread)
-    try:
-        loop = asyncio.get_event_loop()
-        for sig in [signal.SIGINT, signal.SIGTERM]:
-            loop.add_signal_handler(
-                sig, lambda: asyncio.create_task(shutdown_handler(sig, None))
-            )
-    except RuntimeError as e:
-        # Signal handlers can only be set in the main thread
-        logger.info("signal_handlers_skipped", reason=str(e))
+    # Signal handlers are handled by uvicorn, no need for custom handlers
 
     yield
 
