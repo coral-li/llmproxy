@@ -418,6 +418,7 @@ class CacheManager:
 
     async def invalidate_request(self, request_data: dict) -> bool:
         """Invalidate cache for a specific request"""
+        key = None
         try:
             key = self._generate_cache_key(request_data)
 
@@ -451,7 +452,7 @@ class CacheManager:
             logger.error(
                 "cache_invalidate_request_error",
                 error=str(e),
-                key=key if "key" in locals() else "unknown",
+                key=key if key is not None else "unknown",
             )
             return False
 
