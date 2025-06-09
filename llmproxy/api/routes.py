@@ -18,7 +18,7 @@ def create_router(
     llm_client: Optional[Callable[[], LLMClient]] = None,
     config: Optional[Callable[[], Any]] = None,
 ) -> APIRouter:
-    """Create FastAPI router with actual LLM proxy endpoints"""
+    """Create FastAPI router with all LLM proxy endpoints"""
 
     router = APIRouter()
 
@@ -44,12 +44,6 @@ def create_router(
     @router.post("/chat/completions")
     async def chat_completions(request: Request) -> Any:
         return await _handle_endpoint(request, get_chat_handler, _process_chat_request)
-
-    @router.post("/completions")
-    async def completions(request: Request) -> Any:
-        return await _handle_endpoint(
-            request, get_chat_handler, _process_legacy_completions_request
-        )
 
     @router.post("/responses")
     async def responses(request: Request) -> Any:
@@ -128,23 +122,6 @@ async def _process_chat_request(
     handler: ChatCompletionHandler, request_data: dict
 ) -> Any:
     return await handler.handle_request(request_data)
-
-
-async def _process_legacy_completions_request(
-    handler: ChatCompletionHandler, request_data: dict
-) -> Any:
-    prompt = request_data.get("prompt", "")
-    messages = [{"role": "user", "content": prompt}]
-    request_data["messages"] = messages
-    request_data.pop("prompt", None)
-    response = await handler.handle_request(request_data)
-    if isinstance(response, dict) and "choices" in response:
-        for choice in response.get("choices", []):
-            if "message" in choice:
-                choice["text"] = choice["message"].get("content", "")
-                choice.pop("message", None)
-        response["object"] = "text_completion"
-    return response
 
 
 async def _process_response_request(

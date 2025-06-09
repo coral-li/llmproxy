@@ -106,7 +106,7 @@ from openai import OpenAI
 # Point to the local proxy instead of OpenAI
 # The proxy URL is configured in llmproxy.yaml
 client = OpenAI(
-    base_url="http://127.0.0.1:5000/v1",  # Match your llmproxy.yaml settings
+    base_url="http://127.0.0.1:5000",  # Match your llmproxy.yaml settings
     api_key="dummy-key"  # Auth is handled by proxy
 )
 
@@ -188,7 +188,7 @@ general_settings:
 
 ### API Endpoints
 
-- `POST /v1/chat/completions` - OpenAI-compatible chat completions
+- `POST /chat/completions` - OpenAI-compatible chat completions
 - `POST /responses` - OpenAI's new Responses API
 - `GET /health` - Health check endpoint
 - `GET /stats` - Proxy statistics and endpoint status
