@@ -52,12 +52,10 @@ async def test_invalidate_request_works_normally():
     # Should return True on success
     assert result is True
 
-    # Should have checked for existence of cache keys
-    assert (
-        mock_redis.exists.call_count == 4
-    )  # regular, stream, responses_stream, responses_normalized
+    # Should not check for existence (atomic delete operations)
+    assert mock_redis.exists.call_count == 0
 
-    # Should have deleted existing keys
+    # Should have attempted to delete all 4 key types
     assert mock_redis.delete.call_count == 4
 
 
