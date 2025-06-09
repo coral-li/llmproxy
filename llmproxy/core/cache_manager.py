@@ -2,7 +2,7 @@ import hashlib
 import json
 import time
 import uuid
-from typing import AsyncIterator, Dict, List, Optional, Union
+from typing import AsyncIterator, Dict, List, Optional, Tuple, Union
 
 import redis.asyncio as redis
 
@@ -474,27 +474,37 @@ class StreamingCacheWriter:
         self.current_event = None
         self.buffered_lines: List[str] = []
 
-    def _parse_responses_event(self, chunk: str) -> Optional[EventAwareChunk]:
-        """Parse a responses API SSE event and return normalized chunk"""
+    def _parse_sse_lines(self, chunk: str) -> Tuple[Optional[str], Optional[dict]]:
+        """Parse SSE lines to extract event type and data"""
         lines = chunk.strip().split("\n")
-
         event_type = None
-        event_data = None
+        data_lines = []
 
+        # First pass: collect all event and data lines
         for line in lines:
             if line.startswith("event: "):
                 event_type = line[7:].strip()
-            elif line.startswith("data: ") and event_type:
-                try:
-                    event_data = json.loads(line[6:])
-                except json.JSONDecodeError:
-                    logger.debug("parse_responses_event_json_error", line=line)
-                    continue
+            elif line.startswith("data: "):
+                data_lines.append(line[6:])
 
-        if not event_type or not event_data:
-            return None
+        # Second pass: try to parse the first valid JSON data line
+        event_data = None
+        for data_content in data_lines:
+            try:
+                event_data = json.loads(data_content.strip())
+                break  # Use the first successfully parsed data line
+            except json.JSONDecodeError:
+                logger.debug(
+                    "parse_responses_event_json_error", data_content=data_content
+                )
+                continue
 
-        # Create normalized chunk based on event type
+        return event_type, event_data
+
+    def _create_response_chunk(
+        self, event_type: str, event_data: dict
+    ) -> Optional[EventAwareChunk]:
+        """Create EventAwareChunk based on event type and data"""
         if event_type == "response.created":
             return EventAwareChunk(
                 event_type=event_type,
@@ -549,6 +559,15 @@ class StreamingCacheWriter:
             )
 
         return None
+
+    def _parse_responses_event(self, chunk: str) -> Optional[EventAwareChunk]:
+        """Parse a responses API SSE event and return normalized chunk"""
+        event_type, event_data = self._parse_sse_lines(chunk)
+
+        if not event_type or not event_data:
+            return None
+
+        return self._create_response_chunk(event_type, event_data)
 
     async def write_and_yield(self, chunk: str) -> str:
         """Write chunk to cache and yield it"""
