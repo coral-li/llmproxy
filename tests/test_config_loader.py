@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from llmproxy.config.config_loader import load_config, resolve_env_vars
+from llmproxy.config.config_loader import load_config_async, resolve_env_vars
 from llmproxy.config_model import LLMProxyConfig
 
 
@@ -99,7 +99,7 @@ class TestResolveEnvVars:
 
 
 class TestLoadConfig:
-    """Test cases for load_config function"""
+    """Test cases for load_config_async function"""
 
     def create_test_config_file(self, content: dict) -> str:
         """Helper to create a temporary config file"""
@@ -108,7 +108,7 @@ class TestLoadConfig:
         temp_file.flush()
         return temp_file.name
 
-    def test_load_config_with_explicit_path(self):
+    async def test_load_config_with_explicit_path(self):
         """Test loading config with explicit path"""
         config_content = {
             "general_settings": {
@@ -137,14 +137,14 @@ class TestLoadConfig:
 
         config_path = self.create_test_config_file(config_content)
         try:
-            config = load_config(config_path)
+            config = await load_config_async(config_path)
             assert isinstance(config, LLMProxyConfig)
             assert config.general_settings.bind_address == "127.0.0.1"
             assert config.general_settings.bind_port == 8000
         finally:
             os.unlink(config_path)
 
-    def test_load_config_with_env_var_path(self):
+    async def test_load_config_with_env_var_path(self):
         """Test loading config using LLMPROXY_CONFIG environment variable"""
         config_content = {
             "general_settings": {
@@ -160,13 +160,13 @@ class TestLoadConfig:
         config_path = self.create_test_config_file(config_content)
         try:
             with patch.dict(os.environ, {"LLMPROXY_CONFIG": config_path}):
-                config = load_config()
+                config = await load_config_async()
                 assert config.general_settings.bind_address == "0.0.0.0"
                 assert config.general_settings.bind_port == 9000
         finally:
             os.unlink(config_path)
 
-    def test_load_config_default_path(self):
+    async def test_load_config_default_path(self):
         """Test loading config from default path"""
         config_content = {
             "general_settings": {
@@ -187,16 +187,16 @@ class TestLoadConfig:
             with patch("os.getcwd", return_value=temp_dir), patch.dict(
                 os.environ, {}, clear=True
             ):  # Clear LLMPROXY_CONFIG
-                config = load_config()
+                config = await load_config_async()
                 assert config.general_settings.bind_address == "localhost"
                 assert config.general_settings.bind_port == 3000
 
-    def test_load_config_file_not_found(self):
+    async def test_load_config_file_not_found(self):
         """Test error when config file doesn't exist"""
         with pytest.raises(FileNotFoundError, match="Configuration file not found"):
-            load_config("/nonexistent/path/config.yaml")
+            await load_config_async("/nonexistent/path/config.yaml")
 
-    def test_load_config_with_env_vars(self):
+    async def test_load_config_with_env_vars(self):
         """Test loading config with environment variable substitution"""
         config_content = {
             "general_settings": {
@@ -237,14 +237,14 @@ class TestLoadConfig:
                     "API_KEY": "secret-key",
                 },
             ):
-                config = load_config(config_path)
+                config = await load_config_async(config_path)
                 assert config.general_settings.bind_address == "0.0.0.0"
                 # Note: bind_port will be converted to int by pydantic
                 assert config.general_settings.bind_port == 8080
         finally:
             os.unlink(config_path)
 
-    def test_load_config_cache_params_inheritance(self):
+    async def test_load_config_cache_params_inheritance(self):
         """Test cache params inheriting from general settings"""
         config_content = {
             "general_settings": {
@@ -263,7 +263,7 @@ class TestLoadConfig:
 
         config_path = self.create_test_config_file(config_content)
         try:
-            config = load_config(config_path)
+            config = await load_config_async(config_path)
             cache_params = config.general_settings.cache_params
             assert cache_params.host == "redis.example.com"
             assert cache_params.port == 6379
@@ -272,7 +272,7 @@ class TestLoadConfig:
         finally:
             os.unlink(config_path)
 
-    def test_load_config_cache_params_explicit_override(self):
+    async def test_load_config_cache_params_explicit_override(self):
         """Test cache params with explicit values (no inheritance)"""
         config_content = {
             "general_settings": {
@@ -293,7 +293,7 @@ class TestLoadConfig:
 
         config_path = self.create_test_config_file(config_content)
         try:
-            config = load_config(config_path)
+            config = await load_config_async(config_path)
             cache_params = config.general_settings.cache_params
             assert cache_params.host == "cache.example.com"
             assert cache_params.port == 6380
@@ -302,7 +302,7 @@ class TestLoadConfig:
         finally:
             os.unlink(config_path)
 
-    def test_load_config_no_cache_params(self):
+    async def test_load_config_no_cache_params(self):
         """Test loading config without cache_params section"""
         config_content = {
             "general_settings": {
@@ -317,13 +317,13 @@ class TestLoadConfig:
 
         config_path = self.create_test_config_file(config_content)
         try:
-            config = load_config(config_path)
+            config = await load_config_async(config_path)
             # Should load successfully without cache_params
             assert config.general_settings.bind_address == "127.0.0.1"
         finally:
             os.unlink(config_path)
 
-    def test_load_config_invalid_yaml(self):
+    async def test_load_config_invalid_yaml(self):
         """Test error with invalid YAML"""
         temp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
         temp_file.write("invalid: yaml: content: [\n")
@@ -331,11 +331,11 @@ class TestLoadConfig:
 
         try:
             with pytest.raises(yaml.YAMLError):
-                load_config(temp_file.name)
+                await load_config_async(temp_file.name)
         finally:
             os.unlink(temp_file.name)
 
-    def test_load_config_validation_error(self):
+    async def test_load_config_validation_error(self):
         """Test error with invalid config structure"""
         config_content = {
             "general_settings": {"bind_port": "invalid_port"}  # Should be integer
@@ -344,6 +344,6 @@ class TestLoadConfig:
         config_path = self.create_test_config_file(config_content)
         try:
             with pytest.raises(Exception):  # Pydantic validation error
-                load_config(config_path)
+                await load_config_async(config_path)
         finally:
             os.unlink(config_path)

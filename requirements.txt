@@ -13,6 +13,9 @@ requests
 pyyaml
 python-dotenv
 
+# File I/O
+aiofiles
+
 # Logging
 structlog
 

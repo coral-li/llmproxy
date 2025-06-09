@@ -299,7 +299,7 @@ from fastapi.responses import StreamingResponse
 import asyncio
 from typing import Optional
 
-from config.config_loader import load_config
+from config.config_loader import load_config_async
 from managers.load_balancer import LoadBalancer
 from managers.rate_limit_manager import RateLimitManager
 from core.cache_manager import CacheManager
@@ -323,7 +323,7 @@ async def startup_event():
     global config, load_balancer, rate_limit_manager, cache_manager, llm_client, redis_manager
 
     # Load configuration
-    config = load_config("llmproxy.yaml")
+    config = await load_config_async("llmproxy.yaml")
 
     # Initialize Redis
     redis_manager = RedisManager(

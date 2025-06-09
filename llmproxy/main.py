@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import sys
@@ -11,7 +12,7 @@ from pydantic import BaseModel
 
 from llmproxy.api.routes import create_router
 from llmproxy.clients.llm_client import LLMClient
-from llmproxy.config.config_loader import load_config
+from llmproxy.config.config_loader import load_config_async
 from llmproxy.core.cache_manager import CacheManager
 from llmproxy.core.exceptions import LLMProxyError
 from llmproxy.core.logger import get_logger, setup_logging
@@ -73,7 +74,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Load configuration
     config_path = os.getenv("LLMPROXY_CONFIG", "llmproxy.yaml")
-    config = load_config(config_path)
+    config = await load_config_async(config_path)
     logger.info("configuration_loaded", config_path=config_path)
 
     # Initialize Redis and endpoint state manager
@@ -312,7 +313,7 @@ def main() -> None:
     try:
         # Load configuration to get proper host and port
         config_path = os.getenv("LLMPROXY_CONFIG", "llmproxy.yaml")
-        config = load_config(config_path)
+        config = asyncio.run(load_config_async(config_path))
 
         # Use configured bind address and port
         host = config.general_settings.bind_address

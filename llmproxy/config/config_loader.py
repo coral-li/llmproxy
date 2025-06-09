@@ -1,6 +1,7 @@
 import os
 from typing import Any, Optional
 
+import aiofiles
 import yaml
 
 from llmproxy.config_model import LLMProxyConfig
@@ -39,7 +40,7 @@ def resolve_env_vars(data: Any) -> Any:
     return resolved_data
 
 
-def load_config(config_path: Optional[str] = None) -> LLMProxyConfig:
+async def load_config_async(config_path: Optional[str] = None) -> LLMProxyConfig:
     """
     Load and validate YAML configuration using the Pydantic model
 
@@ -60,8 +61,10 @@ def load_config(config_path: Optional[str] = None) -> LLMProxyConfig:
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
-    with open(config_path, "r") as file:
-        yaml_data = yaml.safe_load(file)
+    # Use async file operations
+    async with aiofiles.open(config_path, "r") as file:
+        content = await file.read()
+        yaml_data = yaml.safe_load(content)
 
     # Replace environment variable references with actual values
     yaml_data = resolve_env_vars(yaml_data)
@@ -82,3 +85,21 @@ def load_config(config_path: Optional[str] = None) -> LLMProxyConfig:
     # Create and validate the configuration
     config = LLMProxyConfig(**yaml_data)
     return config
+
+
+# Backward compatibility alias - now just calls the async version
+def load_config(config_path: Optional[str] = None) -> LLMProxyConfig:
+    """
+    Synchronous wrapper for load_config_async for backward compatibility.
+
+    Args:
+        config_path: Path to the YAML configuration file. If not provided,
+                    checks LLMPROXY_CONFIG environment variable, then defaults to
+                    'llmproxy.yaml' in the current working directory.
+
+    Returns:
+        Validated LLMProxyConfig instance
+    """
+    import asyncio
+
+    return asyncio.run(load_config_async(config_path))

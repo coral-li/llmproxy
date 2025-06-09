@@ -2,13 +2,14 @@
 """Command line interface for LLMProxy"""
 
 import argparse
+import asyncio
 import os
 import sys
 
 import uvicorn
 from dotenv import load_dotenv
 
-from llmproxy.config.config_loader import load_config
+from llmproxy.config.config_loader import load_config_async
 from llmproxy.core.logger import setup_logging
 
 
@@ -44,7 +45,7 @@ def main() -> None:
 
     try:
         # Load configuration
-        config = load_config(args.config)
+        config = asyncio.run(load_config_async(args.config))
 
         # Override with command line arguments if provided
         host = args.host or config.general_settings.bind_address

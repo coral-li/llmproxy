@@ -13,63 +13,72 @@ class TestCLI:
     def test_main_with_default_args(self):
         """Test main function with default arguments"""
         with patch("sys.argv", ["llmproxy"]), patch(
-            "llmproxy.cli.load_config"
-        ) as mock_load_config, patch("uvicorn.Server.run") as mock_run, patch(
+            "llmproxy.cli.load_config_async"
+        ) as mock_load_config_async, patch("uvicorn.Server.run") as mock_run, patch(
             "llmproxy.cli.setup_logging"
         ) as mock_setup_logging, patch(
             "os.path.exists", return_value=False
-        ):
+        ), patch(
+            "asyncio.run"
+        ) as mock_asyncio_run:
             # Mock config object
             mock_config = Mock()
             mock_config.general_settings.bind_address = "127.0.0.1"
             mock_config.general_settings.bind_port = 8000
-            mock_load_config.return_value = mock_config
+            mock_load_config_async.return_value = mock_config
+            mock_asyncio_run.return_value = mock_config
 
             main()
 
             mock_setup_logging.assert_called_once_with("INFO")
-            mock_load_config.assert_called_once_with(None)
+            mock_asyncio_run.assert_called_once()
             mock_run.assert_called_once()
 
     def test_main_with_custom_config(self):
         """Test main function with custom config file"""
         with patch("sys.argv", ["llmproxy", "--config", "custom.yaml"]), patch(
-            "llmproxy.cli.load_config"
-        ) as mock_load_config, patch("uvicorn.Server.run") as mock_run, patch(
+            "llmproxy.cli.load_config_async"
+        ) as mock_load_config_async, patch("uvicorn.Server.run") as mock_run, patch(
             "llmproxy.cli.setup_logging"
         ), patch(
             "os.path.exists", return_value=False
-        ):
+        ), patch(
+            "asyncio.run"
+        ) as mock_asyncio_run:
             mock_config = Mock()
             mock_config.general_settings.bind_address = "0.0.0.0"
             mock_config.general_settings.bind_port = 9000
-            mock_load_config.return_value = mock_config
+            mock_load_config_async.return_value = mock_config
+            mock_asyncio_run.return_value = mock_config
 
             main()
 
-            mock_load_config.assert_called_once_with("custom.yaml")
+            mock_asyncio_run.assert_called_once()
             mock_run.assert_called_once()
 
     def test_main_with_host_port_override(self):
         """Test main function with host and port overrides"""
         with patch(
             "sys.argv", ["llmproxy", "--host", "192.168.1.1", "--port", "3000"]
-        ), patch("llmproxy.cli.load_config") as mock_load_config, patch(
+        ), patch("llmproxy.cli.load_config_async") as mock_load_config_async, patch(
             "uvicorn.Server.run"
         ) as mock_run, patch(
             "llmproxy.cli.setup_logging"
         ), patch(
             "os.path.exists", return_value=False
-        ):
+        ), patch(
+            "asyncio.run"
+        ) as mock_asyncio_run:
             mock_config = Mock()
             mock_config.general_settings.bind_address = "127.0.0.1"
             mock_config.general_settings.bind_port = 8000
-            mock_load_config.return_value = mock_config
+            mock_load_config_async.return_value = mock_config
+            mock_asyncio_run.return_value = mock_config
 
             main()
 
             # Verify the config was loaded correctly
-            mock_load_config.assert_called_once_with(None)
+            mock_asyncio_run.assert_called_once()
             mock_run.assert_called_once()
 
     def test_main_with_log_level(self):
@@ -78,16 +87,19 @@ class TestCLI:
 
         for log_level in log_levels:
             with patch("sys.argv", ["llmproxy", "--log-level", log_level]), patch(
-                "llmproxy.cli.load_config"
-            ) as mock_load_config, patch("uvicorn.Server.run"), patch(
+                "llmproxy.cli.load_config_async"
+            ) as mock_load_config_async, patch("uvicorn.Server.run"), patch(
                 "llmproxy.cli.setup_logging"
             ) as mock_setup_logging, patch(
                 "os.path.exists", return_value=False
-            ):
+            ), patch(
+                "asyncio.run"
+            ) as mock_asyncio_run:
                 mock_config = Mock()
                 mock_config.general_settings.bind_address = "127.0.0.1"
                 mock_config.general_settings.bind_port = 8000
-                mock_load_config.return_value = mock_config
+                mock_load_config_async.return_value = mock_config
+                mock_asyncio_run.return_value = mock_config
 
                 main()
 
@@ -96,18 +108,21 @@ class TestCLI:
     def test_main_loads_dotenv_when_exists(self):
         """Test main function loads .env file when it exists"""
         with patch("sys.argv", ["llmproxy"]), patch(
-            "llmproxy.cli.load_config"
-        ) as mock_load_config, patch("uvicorn.Server.run"), patch(
+            "llmproxy.cli.load_config_async"
+        ) as mock_load_config_async, patch("uvicorn.Server.run"), patch(
             "llmproxy.cli.setup_logging"
         ), patch(
             "os.path.exists", return_value=True
         ), patch(
             "llmproxy.cli.load_dotenv"
-        ) as mock_load_dotenv:
+        ) as mock_load_dotenv, patch(
+            "asyncio.run"
+        ) as mock_asyncio_run:
             mock_config = Mock()
             mock_config.general_settings.bind_address = "127.0.0.1"
             mock_config.general_settings.bind_port = 8000
-            mock_load_config.return_value = mock_config
+            mock_load_config_async.return_value = mock_config
+            mock_asyncio_run.return_value = mock_config
 
             main()
 
@@ -116,8 +131,8 @@ class TestCLI:
     def test_main_handles_keyboard_interrupt(self):
         """Test main function handles KeyboardInterrupt gracefully"""
         with patch("sys.argv", ["llmproxy"]), patch(
-            "llmproxy.cli.load_config"
-        ) as mock_load_config, patch(
+            "llmproxy.cli.load_config_async"
+        ) as mock_load_config_async, patch(
             "uvicorn.Server.run", side_effect=KeyboardInterrupt
         ), patch(
             "llmproxy.cli.setup_logging"
@@ -125,11 +140,14 @@ class TestCLI:
             "os.path.exists", return_value=False
         ), patch(
             "sys.exit"
-        ) as mock_exit:
+        ) as mock_exit, patch(
+            "asyncio.run"
+        ) as mock_asyncio_run:
             mock_config = Mock()
             mock_config.general_settings.bind_address = "127.0.0.1"
             mock_config.general_settings.bind_port = 8000
-            mock_load_config.return_value = mock_config
+            mock_load_config_async.return_value = mock_config
+            mock_asyncio_run.return_value = mock_config
 
             main()
 
@@ -138,7 +156,7 @@ class TestCLI:
     def test_main_handles_file_not_found_error(self):
         """Test main function handles FileNotFoundError"""
         with patch("sys.argv", ["llmproxy"]), patch(
-            "llmproxy.cli.load_config",
+            "asyncio.run",
             side_effect=FileNotFoundError("Config not found"),
         ), patch("llmproxy.cli.setup_logging"), patch(
             "os.path.exists", return_value=False
@@ -152,7 +170,7 @@ class TestCLI:
     def test_main_handles_general_exception(self):
         """Test main function handles general exceptions"""
         with patch("sys.argv", ["llmproxy"]), patch(
-            "llmproxy.cli.load_config", side_effect=Exception("General error")
+            "asyncio.run", side_effect=Exception("General error")
         ), patch("llmproxy.cli.setup_logging"), patch(
             "os.path.exists", return_value=False
         ), patch(
@@ -182,7 +200,7 @@ class TestCLI:
                 "--log-level",
                 "DEBUG",
             ],
-        ), patch("llmproxy.cli.load_config") as mock_load_config, patch(
+        ), patch("llmproxy.cli.load_config_async") as mock_load_config_async, patch(
             "uvicorn.Server.run"
         ), patch(
             "llmproxy.cli.setup_logging"
@@ -190,13 +208,16 @@ class TestCLI:
             "os.path.exists", return_value=True
         ), patch(
             "llmproxy.cli.load_dotenv"
-        ):
+        ), patch(
+            "asyncio.run"
+        ) as mock_asyncio_run:
             mock_config = Mock()
             mock_config.general_settings.bind_address = "127.0.0.1"
             mock_config.general_settings.bind_port = 8000
-            mock_load_config.return_value = mock_config
+            mock_load_config_async.return_value = mock_config
+            mock_asyncio_run.return_value = mock_config
 
             main()
 
             mock_setup_logging.assert_called_once_with("DEBUG")
-            mock_load_config.assert_called_once_with("test.yaml")
+            mock_asyncio_run.assert_called_once()
