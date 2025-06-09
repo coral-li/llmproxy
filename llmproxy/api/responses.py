@@ -210,9 +210,7 @@ class ResponseHandler:
     async def _build_streaming_response(
         self, endpoint: Endpoint, request_data: dict, response: dict
     ) -> StreamingResponse:
-        should_cache = self.cache_manager._should_cache(
-            request_data, ignore_streaming=True
-        )
+        should_cache = self.cache_manager._should_cache(request_data)
         if should_cache:
             cache_writer = await self.cache_manager.create_streaming_cache_writer(
                 request_data
