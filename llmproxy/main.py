@@ -121,10 +121,6 @@ async def lifespan(app: FastAPI):
         
         logger.info("application_started_successfully")
         
-        # Set up signal handlers
-        signal.signal(signal.SIGINT, lambda s, f: asyncio.create_task(shutdown_handler(s, f)))
-        signal.signal(signal.SIGTERM, lambda s, f: asyncio.create_task(shutdown_handler(s, f)))
-        
         yield
         
     except Exception as e:

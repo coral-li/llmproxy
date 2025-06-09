@@ -3,7 +3,6 @@
 
 import os
 import sys
-import signal
 import argparse
 from pathlib import Path
 from dotenv import load_dotenv
@@ -56,10 +55,8 @@ def main():
         print(f"Starting LLMProxy on {host}:{port}")
         print(f"Configuration loaded from: {args.config or 'llmproxy.yaml'}")
         
-        # Start the server with proper signal handling
-        # Using module string instead of importing app directly
-        # This allows uvicorn to properly handle signals
-        uvicorn.run(
+        # Create uvicorn config with proper signal handling
+        config_obj = uvicorn.Config(
             "llmproxy.main:app",
             host=host,
             port=port,
@@ -70,6 +67,14 @@ def main():
             reload=False
         )
         
+        # Create server and run with proper signal handling
+        server = uvicorn.Server(config_obj)
+        server.run()
+        
+    except KeyboardInterrupt:
+        # Handle CTRL+C gracefully without ugly traceback
+        print("\nLLMProxy shutdown complete.")
+        sys.exit(0)
     except FileNotFoundError as e:
         print(f"Error: {e}")
         print("Please ensure llmproxy.yaml exists in the current directory or specify --config")
