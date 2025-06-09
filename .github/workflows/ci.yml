@@ -61,15 +61,3 @@ jobs:
       env:
         REDIS_HOST: localhost
         REDIS_PORT: 6379
-
-    - name: List coverage files (for debugging)
-      run: |
-        ls -la coverage.xml || echo "coverage.xml not found"
-        ls -la *.xml || echo "No XML files found"
-
-    - name: Upload coverage reports to Codecov
-      uses: codecov/codecov-action@v3
-      with:
-        file: ./coverage.xml
-        fail_ci_if_error: false
-      if: always()

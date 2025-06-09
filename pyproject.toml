@@ -46,7 +46,6 @@ dev = [
     "pytest-asyncio",
     "pytest-mock",
     "pytest-xdist",
-    "pytest-cov",
     "black==24.3.0",
     "flake8==7.0.0",
     "isort==5.13.2",
@@ -59,7 +58,6 @@ test = [
     "pytest-asyncio",
     "pytest-mock",
     "pytest-xdist",
-    "pytest-cov",
 ]
 lint = [
     "black==24.3.0",
@@ -160,37 +158,9 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
-    "--cov=llmproxy",
-    "--cov-report=term-missing",
-    "--cov-report=html:htmlcov",
-    "--cov-report=xml:coverage.xml",
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
-]
-
-[tool.coverage.run]
-source = ["llmproxy"]
-omit = [
-    "*/tests/*",
-    "*/test_*.py",
-    "*/*_test.py",
-    "*/conftest.py",
-    "*/setup.py",
-]
-
-[tool.coverage.report]
-exclude_lines = [
-    "pragma: no cover",
-    "def __repr__",
-    "if self.debug:",
-    "if settings.DEBUG",
-    "raise AssertionError",
-    "raise NotImplementedError",
-    "if 0:",
-    "if __name__ == .__main__.:",
-    "class .*\\bProtocol\\):",
-    "@(abc\\.)?abstractmethod",
 ]
