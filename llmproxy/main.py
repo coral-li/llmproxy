@@ -270,18 +270,7 @@ def get_config_required() -> Any:
     return config
 
 
-# Include API routes with /v1 prefix
-app.include_router(
-    create_router(
-        get_load_balancer=get_load_balancer_required,
-        cache_manager=get_cache_manager_required,
-        llm_client=get_llm_client_required,
-        config=get_config_required,
-    ),
-    prefix="/v1",
-)
-
-# Also include routes without prefix for direct access
+# Include all API routes without prefix (OpenAI compatible)
 app.include_router(
     create_router(
         get_load_balancer=get_load_balancer_required,
