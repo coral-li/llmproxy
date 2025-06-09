@@ -422,14 +422,21 @@ class CacheManager:
             key = self._generate_cache_key(request_data)
 
             # Delete both regular and streaming cache entries
+            # Covers chat completions (:stream) and responses API
             regular_key = key
             streaming_key = f"{key}:stream"
+            responses_stream_key = f"{key}:responses_stream"
+            responses_normalized_key = f"{responses_stream_key}:normalized"
 
             deleted = 0
             if await self.redis.exists(regular_key):
                 deleted += await self.redis.delete(regular_key)
             if await self.redis.exists(streaming_key):
                 deleted += await self.redis.delete(streaming_key)
+            if await self.redis.exists(responses_stream_key):
+                deleted += await self.redis.delete(responses_stream_key)
+            if await self.redis.exists(responses_normalized_key):
+                deleted += await self.redis.delete(responses_normalized_key)
 
             if deleted > 0:
                 logger.info(
