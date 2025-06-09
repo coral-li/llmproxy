@@ -12,7 +12,7 @@ A high-performance proxy server for Large Language Models (LLMs) that provides i
 - **OpenAI Compatible**: Drop-in replacement for OpenAI API clients (both Chat Completions and Responses APIs)
 - **Multi-Provider Support**: Works with OpenAI and Azure OpenAI endpoints
 - **Health Monitoring**: Track endpoint health and automatically cooldown failed endpoints
-- **Responses API Support**: Full support for OpenAI's new Responses API with conversation state management
+- **Responses API Support**: Support for OpenAI's new Responses API
 - **Comprehensive test suite with automated setup**: Tests automatically start and stop proxy instances
 
 ## Quick Start
@@ -59,13 +59,6 @@ cp llmproxy.yaml.example llmproxy.yaml
 ```
 
 2. Set up environment variables:
-
-**Option A: For testing (no real API keys needed)**
-```bash
-python setup_test_env.py
-```
-
-**Option B: For production use**
 ```bash
 cp env.example .env
 # Edit .env with your API keys and configuration
@@ -175,7 +168,7 @@ Edit `llmproxy.yaml` to configure:
 - Weights for load distribution
 - Rate limiting and retry settings
 - Caching parameters
-- Bind address and port (default: 127.0.0.1:5000)
+- Bind address and port (configurable via `llmproxy.yaml`)
 
 See `llmproxy.yaml` for a complete example. The bind address and port are set in the `general_settings` section:
 
@@ -193,16 +186,6 @@ general_settings:
 - `GET /health` - Health check endpoint
 - `GET /stats` - Proxy statistics and endpoint status
 
-### Responses API Features
-
-The proxy fully supports OpenAI's new Responses API, including:
-
-- **Conversation State**: Use `previous_response_id` to maintain conversation context
-- **Semantic Events**: Better streaming support with typed events
-- **Future Tools**: Ready for web search, file search, and computer use tools
-- **Structured Outputs**: Use `text.format` for structured responses
-
-See [RESPONSES_API.md](RESPONSES_API.md) for detailed documentation on using the Responses API.
 
 ## Architecture
 
