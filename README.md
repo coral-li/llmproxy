@@ -218,7 +218,8 @@ The test suite now automatically starts and stops proxy instances, eliminating t
 
 ### Prerequisites
 
-- Redis must be running locally on the default port (6379)
+- The `redis-server` binary must be installed (tests will start a temporary
+  instance if Redis is not already running on port 6379)
 - The `requests` package (included in requirements.txt)
 
 ### Running Tests
