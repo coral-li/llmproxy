@@ -7,6 +7,7 @@ pydantic-settings
 # HTTP Clients
 httpx
 openai
+requests
 
 # Configuration
 pyyaml
