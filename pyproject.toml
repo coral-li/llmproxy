@@ -2,6 +2,80 @@
 requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "llmproxy"
+version = "0.1.0"
+description = "An intelligent load balancer and proxy for LLM APIs"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "LLMProxy Contributors"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "pydantic-settings",
+    "httpx",
+    "openai",
+    "requests",
+    "pyyaml",
+    "python-dotenv",
+    "structlog",
+    "redis",
+    "hiredis",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-mock",
+    "pytest-xdist",
+    "black==24.3.0",
+    "flake8==7.0.0",
+    "isort==5.13.2",
+    "mypy==1.8.0",
+    "types-PyYAML",
+    "pre-commit",
+]
+test = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-mock",
+    "pytest-xdist",
+]
+lint = [
+    "black==24.3.0",
+    "flake8==7.0.0",
+    "isort==5.13.2",
+    "mypy==1.8.0",
+    "types-PyYAML",
+    "pre-commit",
+]
+
+[project.scripts]
+llmproxy = "llmproxy.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/llmproxy"
+Repository = "https://github.com/yourusername/llmproxy.git"
+Issues = "https://github.com/yourusername/llmproxy/issues"
+
 [tool.black]
 line-length = 88
 target-version = ['py38', 'py39', 'py310', 'py311']
@@ -36,8 +110,11 @@ known_third_party = [
     "redis",
     "pytest",
     "structlog",
+    "requests",
 ]
 skip_glob = ["*/migrations/*"]
+ensure_newline_before_comments = true
+float_to_top = true
 
 [tool.mypy]
 python_version = "3.8"
@@ -60,6 +137,15 @@ module = [
     "redis.*",
     "hiredis.*",
     "structlog.*",
+    "traitlets.*",
+    "trio.*",
+    "anyio.*",
+    "dotenv.*",
+    "httpcore.*",
+    "uvicorn.*",
+    "websockets.*",
+    "fastapi.*",
+    "orjson.*",
 ]
 ignore_missing_imports = true
 
@@ -72,37 +158,9 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
-    "--cov=llmproxy",
-    "--cov-report=term-missing",
-    "--cov-report=html",
-    "--cov-report=xml",
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
-]
-
-[tool.coverage.run]
-source = ["llmproxy"]
-omit = [
-    "*/tests/*",
-    "*/test_*.py",
-    "*/*_test.py",
-    "*/conftest.py",
-    "*/setup.py",
-]
-
-[tool.coverage.report]
-exclude_lines = [
-    "pragma: no cover",
-    "def __repr__",
-    "if self.debug:",
-    "if settings.DEBUG",
-    "raise AssertionError",
-    "raise NotImplementedError",
-    "if 0:",
-    "if __name__ == .__main__.:",
-    "class .*\\bProtocol\\):",
-    "@(abc\\.)?abstractmethod",
 ]

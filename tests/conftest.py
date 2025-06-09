@@ -3,14 +3,9 @@ import json
 import os
 import socket
 import subprocess
-import sys
 import threading
 import time
-from pathlib import Path
 from typing import Generator, Optional
-
-# Add the project root to Python path before other imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pytest  # noqa: E402
 import requests  # noqa: E402

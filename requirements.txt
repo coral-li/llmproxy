@@ -16,18 +16,6 @@ python-dotenv
 # Logging
 structlog
 
-# Testing
-pytest
-pytest-asyncio
-pytest-mock
-pytest-xdist
-pytest-cov
+# Storage
 redis
 hiredis
-
-# Development
-black
-flake8
-isort
-mypy
-pre-commit
