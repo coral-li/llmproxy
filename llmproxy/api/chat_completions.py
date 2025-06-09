@@ -8,18 +8,6 @@ logger = get_logger(__name__)
 class ChatCompletionHandler(BaseRequestHandler):
     """Handles chat completion requests with load balancing, caching, and retries"""
 
-    def _filter_proxy_params(self, request_data: dict) -> dict:
-        """Filter out proxy-specific parameters from request data"""
-        # Create a copy
-        filtered = request_data.copy()
-
-        # Remove proxy-specific fields
-        proxy_fields = ["cache", "extra_body"]
-        for field in proxy_fields:
-            filtered.pop(field, None)
-
-        return filtered
-
     async def _make_request(
         self, endpoint: Endpoint, request_data: dict, is_streaming: bool
     ) -> dict:

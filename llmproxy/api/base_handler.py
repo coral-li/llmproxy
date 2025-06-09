@@ -361,10 +361,26 @@ class BaseRequestHandler(ABC):
             "error": "All endpoints failed after retries",
         }
 
-    @abstractmethod
     def _filter_proxy_params(self, request_data: dict) -> dict:
         """Filter out proxy-specific parameters from request data"""
-        pass
+        # Define proxy-specific parameters that should not be forwarded to upstream APIs
+        proxy_params = {"cache"}
+
+        # Create a copy and remove proxy-specific parameters
+        filtered_data = {}
+        for key, value in request_data.items():
+            if key not in proxy_params:
+                # Handle extra_body specially - filter out proxy cache params but preserve other content
+                if key == "extra_body" and isinstance(value, dict):
+                    filtered_extra_body = {
+                        k: v for k, v in value.items() if k != "cache"
+                    }
+                    if filtered_extra_body:  # Only include if not empty
+                        filtered_data[key] = filtered_extra_body
+                else:
+                    filtered_data[key] = value
+
+        return filtered_data
 
     @abstractmethod
     async def _make_request(

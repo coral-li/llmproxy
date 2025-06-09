@@ -8,27 +8,6 @@ logger = get_logger(__name__)
 class ResponseHandler(BaseRequestHandler):
     """Handles response generation requests with load balancing, caching, and retries"""
 
-    def _filter_proxy_params(self, request_data: dict) -> dict:
-        """Remove proxy-specific parameters from request data"""
-        # Define proxy-specific parameters that should not be forwarded
-        proxy_params = {"cache"}
-
-        # Create a copy and remove proxy-specific parameters
-        filtered_data = {}
-        for key, value in request_data.items():
-            if key not in proxy_params:
-                # Handle extra_body specially - filter out proxy cache params
-                if key == "extra_body" and isinstance(value, dict):
-                    filtered_extra_body = {
-                        k: v for k, v in value.items() if k != "cache"
-                    }
-                    if filtered_extra_body:  # Only include if not empty
-                        filtered_data[key] = filtered_extra_body
-                else:
-                    filtered_data[key] = value
-
-        return filtered_data
-
     async def _make_request(
         self, endpoint: Endpoint, request_data: dict, is_streaming: bool
     ) -> dict:
