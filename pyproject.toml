@@ -35,6 +35,7 @@ dependencies = [
     "requests",
     "pyyaml",
     "python-dotenv",
+    "aiofiles",
     "structlog",
     "redis",
     "hiredis",
