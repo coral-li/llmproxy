@@ -112,7 +112,7 @@ class CacheManager:
 
         return key
 
-    def _should_cache(self, request_data: dict, ignore_streaming: bool = False) -> bool:
+    def _should_cache(self, request_data: dict) -> bool:
         """Determine if request should be cached"""
         # Check for cache control directives
         # Support both direct cache parameter and extra_body.cache
@@ -125,7 +125,6 @@ class CacheManager:
         logger.debug(
             "should_cache_check",
             cache_control=cache_control,
-            ignore_streaming=ignore_streaming,
             is_streaming=request_data.get("stream", False),
             has_extra_body="extra_body" in request_data,
             global_cache_enabled=self.cache_enabled,
@@ -198,7 +197,7 @@ class CacheManager:
 
     async def get_streaming(self, request_data: dict) -> Optional[List[str]]:
         """Get cached streaming response chunks"""
-        if not self._should_cache(request_data, ignore_streaming=True):
+        if not self._should_cache(request_data):
             return None
 
         # Determine if this is a responses API request
@@ -331,7 +330,7 @@ class CacheManager:
         self, request_data: dict, chunk: str, finalize: bool = False
     ) -> None:
         """Cache a streaming response chunk"""
-        if not self._should_cache(request_data, ignore_streaming=True):
+        if not self._should_cache(request_data):
             return
 
         # This method is now handled by StreamingCacheWriter
