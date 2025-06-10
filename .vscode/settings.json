@@ -1,0 +1,42 @@
+{
+    // Python configuration
+    "python.analysis.typeCheckingMode": "basic",
+
+    // Mypy Type Checker extension settings
+    "mypy-type-checker.importStrategy": "fromEnvironment",
+    "mypy-type-checker.reportingScope": "workspace",
+    "mypy-type-checker.preferDaemon": true,
+    "mypy-type-checker.args": [
+        "--config-file=pyproject.toml"
+    ],
+    "mypy-type-checker.severity": {
+        "error": "Error",
+        "warning": "Warning",
+        "note": "Information"
+    },
+    "mypy-type-checker.showNotifications": "onError",
+
+    // Enable format on save and other useful Python settings
+    "python.formatting.provider": "black",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+        "source.organizeImports": "explicit"
+    },
+
+    // File associations for better Python support
+    "files.associations": {
+        "*.py": "python"
+    },
+
+    // Problems panel configuration
+    "problems.autoReveal": true,
+    "problems.defaultViewMode": "list",
+
+    // Editor settings for Python
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter",
+        "editor.formatOnSave": true,
+        "editor.insertSpaces": true,
+        "editor.tabSize": 4
+    }
+}
