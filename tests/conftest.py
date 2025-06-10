@@ -128,8 +128,14 @@ class MockOpenAIServer:
             return f"{instructions} {input_text}".strip(), True
         else:
             messages = body.get("messages", [])
+            # Handle malformed messages gracefully
+            if not isinstance(messages, list):
+                return "malformed_messages", False
             user_message = ""
             for msg in reversed(messages):
+                # Handle malformed message objects
+                if not isinstance(msg, dict):
+                    continue
                 if msg.get("role") == "user":
                     user_message = msg.get("content", "")
                     break

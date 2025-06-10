@@ -1,3 +1,4 @@
+import json
 from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -141,7 +142,15 @@ async def _handle_endpoint(
         return await process_func(handler, request_data)
     except HTTPException:
         raise
+    except (json.JSONDecodeError, ValueError) as e:
+        # Handle JSON parsing errors with 400 Bad Request
+        logger.warning(f"{process_func.__name__}_invalid_json", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON in request body",
+        )
     except Exception as e:
+        # Handle actual server errors with 500 Internal Server Error
         logger.error(f"{process_func.__name__}_error", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
