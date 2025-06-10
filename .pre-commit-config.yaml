@@ -31,8 +31,8 @@ repos:
     hooks:
       - id: mypy
         name: mypy
-        entry: mypy
+        entry: mypy llmproxy
         language: system
         types: [python]
-        files: ^llmproxy/
-        exclude: ^(tests/|setup.py)
+        pass_filenames: false
+        always_run: true
