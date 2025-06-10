@@ -14,10 +14,8 @@
         "warning": "Warning",
         "note": "Information"
     },
-    "mypy-type-checker.showNotifications": "onError",
 
     // Enable format on save and other useful Python settings
-    "python.formatting.provider": "black",
     "editor.formatOnSave": true,
     "editor.codeActionsOnSave": {
         "source.organizeImports": "explicit"
@@ -30,7 +28,7 @@
 
     // Problems panel configuration
     "problems.autoReveal": true,
-    "problems.defaultViewMode": "list",
+    "problems.defaultViewMode": "table",
 
     // Editor settings for Python
     "[python]": {
