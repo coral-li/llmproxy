@@ -47,7 +47,7 @@ cd llmproxy
 
 2. Install dependencies:
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ### Configuration
@@ -203,7 +203,7 @@ The test suite now automatically starts and stops proxy instances, eliminating t
 
 - The `redis-server` binary must be installed (tests will start a temporary
   instance if Redis is not already running on port 6379)
-- The `requests` package (included in requirements.txt)
+- The `requests` package (included in pyproject.toml dependencies)
 
 ### Running Tests
 
@@ -259,7 +259,7 @@ The automated test setup makes development much easier:
 
 - Python 3.8+
 - Redis server
-- See `requirements.txt` for Python dependencies
+- See `pyproject.toml` for Python dependencies
 
 ## Contributing
 

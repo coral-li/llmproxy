@@ -50,6 +50,8 @@ async def init_redis(config: Any) -> Tuple[RedisManager, EndpointStateManager]:
         host=redis_settings.redis_host,
         port=redis_settings.redis_port,
         password=redis_settings.redis_password or None,
+        ssl_enabled=redis_settings.redis_ssl,
+        ssl_cert_reqs=redis_settings.redis_ssl_cert_reqs,
     )
 
     await redis_manager.connect()

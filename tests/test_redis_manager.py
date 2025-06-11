@@ -18,6 +18,8 @@ class TestRedisManager:
         assert manager.host == "localhost"
         assert manager.port == 6379
         assert manager.password == "secret"
+        assert manager.ssl_enabled is False
+        assert manager.ssl_cert_reqs is None
         assert manager.client is None
         assert manager._pool is None
 
@@ -28,6 +30,8 @@ class TestRedisManager:
         assert manager.host == "redis.example.com"
         assert manager.port == 6380
         assert manager.password is None
+        assert manager.ssl_enabled is False
+        assert manager.ssl_cert_reqs is None
 
     @pytest.mark.asyncio
     async def test_connect_success(self):
@@ -62,6 +66,71 @@ class TestRedisManager:
 
             assert manager.client == mock_client
             assert manager._pool == mock_pool
+
+    @pytest.mark.asyncio
+    async def test_connect_with_ssl(self):
+        """Test Redis connection with SSL enabled"""
+        manager = RedisManager(
+            host="redis-ssl.example.com",
+            port=6380,
+            password="secret123",
+            ssl_enabled=True,
+            ssl_cert_reqs="required",
+        )
+
+        with patch("redis.asyncio.ConnectionPool") as mock_pool_class, patch(
+            "redis.asyncio.Redis"
+        ) as mock_redis_class, patch("ssl.create_default_context") as mock_ssl_context:
+            mock_pool = Mock()
+            mock_pool_class.return_value = mock_pool
+
+            mock_client = AsyncMock()
+            mock_redis_class.return_value = mock_client
+
+            mock_context = Mock()
+            mock_ssl_context.return_value = mock_context
+
+            await manager.connect()
+
+            # Verify connection pool creation with SSL using SSLConnection
+            mock_pool_class.assert_called_once_with(
+                host="redis-ssl.example.com",
+                port=6380,
+                password="secret123",
+                connection_class=redis.SSLConnection,
+                ssl_cert_reqs="required",
+                decode_responses=True,
+                max_connections=50,
+            )
+            # create_default_context should not be invoked directly as SSLConnection handles SSL.
+            mock_ssl_context.assert_not_called()
+
+            # Verify Redis client creation
+            mock_redis_class.assert_called_once_with(connection_pool=mock_pool)
+
+            # Verify ping was called
+            mock_client.ping.assert_called_once()
+
+            assert manager.client == mock_client
+            assert manager._pool == mock_pool
+
+    def test_redis_manager_ssl_initialization(self):
+        """Test RedisManager initialization with SSL parameters"""
+        manager = RedisManager(
+            host="redis-ssl.example.com",
+            port=6380,
+            password="secret123",
+            ssl_enabled=True,
+            ssl_cert_reqs="optional",
+        )
+
+        assert manager.host == "redis-ssl.example.com"
+        assert manager.port == 6380
+        assert manager.password == "secret123"
+        assert manager.ssl_enabled is True
+        assert manager.ssl_cert_reqs == "optional"
+        assert manager.client is None
+        assert manager._pool is None
 
     @pytest.mark.asyncio
     async def test_connect_with_password(self):

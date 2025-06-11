@@ -32,6 +32,8 @@ general_settings:
   redis_host: localhost
   redis_port: 6379
   redis_password: ""
+  redis_ssl: false  # No SSL for local testing
+  redis_ssl_cert_reqs: null  # Not needed for local testing
 
   cache: true
   cache_params:

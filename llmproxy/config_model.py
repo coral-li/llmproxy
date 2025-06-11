@@ -52,6 +52,8 @@ class GeneralSettings(BaseModel):
     redis_host: str
     redis_port: Union[int, str]
     redis_password: str
+    redis_ssl: bool = False
+    redis_ssl_cert_reqs: Optional[str] = None  # Options: "required", "optional", "none"
     cache: bool = True
     cache_params: Optional[CacheParams] = None
 

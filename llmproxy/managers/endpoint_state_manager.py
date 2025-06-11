@@ -76,6 +76,74 @@ class EndpointStateManager:
                 "endpoint_state_init_failed", endpoint_id=endpoint.id, error=str(e)
             )
 
+    def _create_default_state(
+        self, endpoint_id: str, allowed_fails: int
+    ) -> Dict[str, Any]:
+        """Create a default endpoint state"""
+        return {
+            "id": endpoint_id,
+            "model": "unknown",
+            "weight": 1,
+            "base_url": "unknown",
+            "is_azure": False,
+            "allowed_fails": allowed_fails,
+            "status": "healthy",
+            "total_requests": 0,
+            "failed_requests": 0,
+            "consecutive_failures": 0,
+            "last_error": None,
+            "last_error_time": None,
+            "last_success_time": None,
+            "cooldown_until": None,
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+    def _safe_int_conversion(self, value: Any, default: int = 0) -> int:
+        """Safely convert value to int, returning default if conversion fails"""
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                return default
+        return default
+
+    def _handle_success_outcome(self, state_data: Dict[str, Any]) -> None:
+        """Handle successful request outcome"""
+        state_data["consecutive_failures"] = 0
+        state_data["status"] = "healthy"
+        state_data["cooldown_until"] = None
+        state_data["last_success_time"] = datetime.utcnow().isoformat()
+
+    def _handle_failure_outcome(
+        self,
+        state_data: Dict[str, Any],
+        error: Optional[str],
+        allowed_fails: int,
+        cooldown_time: int,
+    ) -> None:
+        """Handle failed request outcome"""
+        failed_requests = state_data.get("failed_requests", 0)
+        failed_requests_int = self._safe_int_conversion(failed_requests, 0)
+        state_data["failed_requests"] = failed_requests_int + 1
+
+        consecutive_failures = state_data.get("consecutive_failures", 0)
+        consecutive_failures_int = self._safe_int_conversion(consecutive_failures, 0)
+        state_data["consecutive_failures"] = consecutive_failures_int + 1
+
+        state_data["last_error"] = error
+        state_data["last_error_time"] = datetime.utcnow().isoformat()
+
+        # Check if we should enter cooldown
+        current_failures_val = state_data["consecutive_failures"]
+        current_failures = self._safe_int_conversion(current_failures_val, 0)
+        if current_failures >= allowed_fails:
+            state_data["status"] = "cooling_down"
+            cooldown_until = datetime.utcnow() + timedelta(seconds=cooldown_time)
+            state_data["cooldown_until"] = cooldown_until.isoformat()
+
     async def record_request_outcome(
         self,
         endpoint_id: str,
@@ -84,7 +152,7 @@ class EndpointStateManager:
         allowed_fails: int = 1,
         cooldown_time: int = 60,
     ) -> None:
-        """Record a request outcome and update endpoint state atomically"""  # noqa: C901
+        """Record a request outcome and update endpoint state atomically"""
         try:
             key = self._get_endpoint_key(endpoint_id)
 
@@ -95,25 +163,7 @@ class EndpointStateManager:
                     "endpoint_state_missing_for_request_creating_default",
                     endpoint_id=endpoint_id,
                 )
-                # Create a minimal default state if endpoint state is missing
-                state_data = {
-                    "id": endpoint_id,
-                    "model": "unknown",
-                    "weight": 1,
-                    "base_url": "unknown",
-                    "is_azure": False,
-                    "allowed_fails": allowed_fails,
-                    "status": "healthy",
-                    "total_requests": 0,
-                    "failed_requests": 0,
-                    "consecutive_failures": 0,
-                    "last_error": None,
-                    "last_error_time": None,
-                    "last_success_time": None,
-                    "cooldown_until": None,
-                    "created_at": datetime.utcnow().isoformat(),
-                    "updated_at": datetime.utcnow().isoformat(),
-                }
+                state_data = self._create_default_state(endpoint_id, allowed_fails)
             else:
                 try:
                     state_data = json.loads(current_data)
@@ -122,70 +172,20 @@ class EndpointStateManager:
                         "endpoint_state_corrupted_creating_default",
                         endpoint_id=endpoint_id,
                     )
-                    # Create default state if JSON is corrupted
-                    state_data = {
-                        "id": endpoint_id,
-                        "model": "unknown",
-                        "weight": 1,
-                        "base_url": "unknown",
-                        "is_azure": False,
-                        "allowed_fails": allowed_fails,
-                        "status": "healthy",
-                        "total_requests": 0,
-                        "failed_requests": 0,
-                        "consecutive_failures": 0,
-                        "last_error": None,
-                        "last_error_time": None,
-                        "last_success_time": None,
-                        "cooldown_until": None,
-                        "created_at": datetime.utcnow().isoformat(),
-                        "updated_at": datetime.utcnow().isoformat(),
-                    }
+                    state_data = self._create_default_state(endpoint_id, allowed_fails)
 
-            # Update counters with safe conversion
-            def safe_int_conversion(value: Any, default: int = 0) -> int:
-                """Safely convert value to int, returning default if conversion fails"""
-                if isinstance(value, int):
-                    return value
-                if isinstance(value, str):
-                    try:
-                        return int(value)
-                    except ValueError:
-                        return default
-                return default
-
+            # Update total requests counter
             total_requests = state_data.get("total_requests", 0)
-            total_requests_int = safe_int_conversion(total_requests, 0)
+            total_requests_int = self._safe_int_conversion(total_requests, 0)
             state_data["total_requests"] = total_requests_int + 1
 
+            # Handle success or failure
             if success:
-                # Success: reset failures, mark healthy
-                state_data["consecutive_failures"] = 0
-                state_data["status"] = "healthy"
-                state_data["cooldown_until"] = None
-                state_data["last_success_time"] = datetime.utcnow().isoformat()
+                self._handle_success_outcome(state_data)
             else:
-                # Failure: increment counters, check for cooldown
-                failed_requests = state_data.get("failed_requests", 0)
-                failed_requests_int = safe_int_conversion(failed_requests, 0)
-                state_data["failed_requests"] = failed_requests_int + 1
-
-                consecutive_failures = state_data.get("consecutive_failures", 0)
-                consecutive_failures_int = safe_int_conversion(consecutive_failures, 0)
-                state_data["consecutive_failures"] = consecutive_failures_int + 1
-
-                state_data["last_error"] = error
-                state_data["last_error_time"] = datetime.utcnow().isoformat()
-
-                # Check if we should enter cooldown
-                current_failures_val = state_data["consecutive_failures"]
-                current_failures = safe_int_conversion(current_failures_val, 0)
-                if current_failures >= allowed_fails:
-                    state_data["status"] = "cooling_down"
-                    cooldown_until = datetime.utcnow() + timedelta(
-                        seconds=cooldown_time
-                    )
-                    state_data["cooldown_until"] = cooldown_until.isoformat()
+                self._handle_failure_outcome(
+                    state_data, error, allowed_fails, cooldown_time
+                )
 
             state_data["updated_at"] = datetime.utcnow().isoformat()
 
