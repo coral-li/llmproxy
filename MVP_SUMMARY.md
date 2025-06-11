@@ -23,7 +23,7 @@ I've created a comprehensive implementation plan for the LLMProxy MVP that addre
 - Performance optimization strategies
 
 ### 3. **Supporting Files**
-- Updated `requirements.txt` with all dependencies
+- Updated `pyproject.toml` with all dependencies
 - `env.example` showing required environment variables
 - `README.md` with quick start guide
 

@@ -5,11 +5,10 @@ help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 install:  ## Install production dependencies
-	pip install -r requirements.txt
+	pip install -e .
 
 install-dev:  ## Install development dependencies
-	pip install -r requirements.txt
-	pip install -e .
+	pip install -e ".[dev]"
 	pre-commit install
 
 format:  ## Format code with black and isort

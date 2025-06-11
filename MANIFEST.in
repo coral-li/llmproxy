@@ -1,5 +1,5 @@
 include README.md
-include requirements.txt
+include pyproject.toml
 recursive-include llmproxy *.py
 exclude llmproxy.yaml
 exclude llmproxy.test.yaml
