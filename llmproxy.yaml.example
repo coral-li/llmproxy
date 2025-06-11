@@ -55,6 +55,8 @@ general_settings:
   redis_host: os.environ/REDIS_HOST
   redis_port: os.environ/REDIS_PORT
   redis_password: os.environ/REDIS_PASSWORD
+  redis_ssl: os.environ/REDIS_SSL  # Set to 'true' for SSL connections
+  redis_ssl_cert_reqs: os.environ/REDIS_SSL_CERT_REQS  # Options: "required", "optional", "none"
 
   cache: True # enable cache
   cache_params:        # set cache params for redis
