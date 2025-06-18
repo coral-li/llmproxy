@@ -182,6 +182,46 @@ class CacheManager:
             logger.error("cache_get_error", error=str(e), key=key)
             return None
 
+    def _is_empty_response(self, response_data: dict) -> bool:
+        """Return True if the response from the LLM is considered *empty* and therefore should not be cached.
+
+        For chat completions style responses (OpenAI compatible) a response is treated as
+        empty when *all* choices are empty – i.e. ``message.content`` or ``text`` is
+        either ``None`` or the empty string after stripping.  A missing ``choices`` key
+        is also interpreted as an empty response.
+        """
+        # No choices at all – treat as empty (cannot determine useful content)
+        if "choices" not in response_data:
+            return True
+
+        choices = response_data.get("choices", [])
+        if not isinstance(choices, list) or len(choices) == 0:
+            return True
+
+        for choice in choices:
+            # Defensive: not all providers include the same shape
+            content: Optional[str] = None
+
+            # Chat completion format { "message": {"content": "..."} }
+            if isinstance(choice, dict):
+                message = (
+                    choice.get("message")
+                    if isinstance(choice.get("message"), dict)
+                    else None
+                )
+                if message is not None:
+                    content = message.get("content")
+                # Legacy / completions format uses "text"
+                if content is None:
+                    content = choice.get("text")
+
+            # If *any* choice contains non-empty content we deem the response useful
+            if isinstance(content, str) and content.strip():
+                return False
+
+        # Reaching here means no choice had meaningful content
+        return True
+
     async def set(self, request_data: dict, response_data: dict) -> None:
         """Cache response for non-streaming requests"""
         if not self._should_cache(request_data):
@@ -190,6 +230,18 @@ class CacheManager:
         # Don't cache error responses
         if "error" in response_data:
             return
+
+        # Skip caching empty model responses so callers can retry later
+        try:
+            if self._is_empty_response(response_data):
+                logger.info(
+                    "cache_skip_empty_response",
+                    request_summary={"model": request_data.get("model")},
+                )
+                return
+        except Exception as e:
+            # If detection fails for whatever reason, fall back to caching to avoid data loss.
+            logger.warning("empty_response_detection_failed", error=str(e))
 
         key = self._generate_cache_key(request_data)
 
@@ -477,6 +529,9 @@ class StreamingCacheWriter:
         self.normalized_chunks: Optional[List[dict]] = [] if is_responses_api else None
         self.current_event = None
         self.buffered_lines: List[str] = []
+        # Indicates if we have observed any non-empty content so that we only cache
+        # meaningful responses.
+        self._has_content: bool = False
 
     def _parse_sse_lines(self, chunk: str) -> Tuple[Optional[str], Optional[dict]]:
         """Parse SSE lines to extract event type and data"""
@@ -640,6 +695,9 @@ class StreamingCacheWriter:
             if normalized_chunk and self.normalized_chunks is not None:
                 self.normalized_chunks.append(normalized_chunk.to_dict())
                 self.chunks_written += 1
+                # Mark as having content if this chunk contains any text delta
+                if normalized_chunk.content and normalized_chunk.content.strip():
+                    self._has_content = True
                 logger.debug(
                     "responses_api_chunk_normalized",
                     event_type=normalized_chunk.event_type,
@@ -653,15 +711,45 @@ class StreamingCacheWriter:
     async def _handle_chat_completions(self, chunk: str) -> None:
         key = f"{self.cache_manager._generate_cache_key(self.request_data)}:stream"
         try:
+            # Detect if chunk carries non-empty content; this is a best-effort
+            # heuristic based on the OpenAI chat completions streaming format.
+            if chunk.startswith("data: "):
+                json_part = chunk[6:].strip()
+                if json_part and json_part != "[DONE]":
+                    try:
+                        payload = json.loads(json_part)
+                        if isinstance(payload, dict):
+                            for choice in payload.get("choices", []):
+                                delta = (
+                                    choice.get("delta", {})
+                                    if isinstance(choice, dict)
+                                    else {}
+                                )
+                                content = (
+                                    delta.get("content")
+                                    if isinstance(delta, dict)
+                                    else None
+                                )
+                                if isinstance(content, str) and content.strip():
+                                    self._has_content = True
+                                    break
+                    except json.JSONDecodeError:
+                        pass
+
             await self.cache_manager.redis.rpush(key, chunk)  # type: ignore
             self.chunks_written += 1
             if chunk.strip() == "data: [DONE]":
-                await self.cache_manager.redis.expire(key, self.cache_manager.ttl)
-                logger.info(
-                    "chat_streaming_cache_finalized",
-                    chunks_written=self.chunks_written,
-                    key=key,
-                )
+                if self._has_content:
+                    await self.cache_manager.redis.expire(key, self.cache_manager.ttl)
+                    logger.info(
+                        "chat_streaming_cache_finalized",
+                        chunks_written=self.chunks_written,
+                        key=key,
+                    )
+                else:
+                    # No meaningful content – remove the list so that future calls can retry.
+                    await self.cache_manager.redis.delete(key)
+                    logger.info("chat_streaming_cache_skipped_empty", key=key)
         except Exception as e:
             logger.error("chat_streaming_cache_error", error=str(e))
 
@@ -670,6 +758,10 @@ class StreamingCacheWriter:
         key = f"{self.cache_manager._generate_cache_key(self.request_data)}:responses_stream"
 
         try:
+            if not self._has_content:
+                logger.info("responses_streaming_cache_skipped_empty", key=key)
+                return
+
             # Store normalized chunks as JSON
             normalized_key = f"{key}:normalized"
             await self.cache_manager.redis.setex(
