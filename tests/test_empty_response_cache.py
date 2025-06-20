@@ -90,9 +90,41 @@ async def test_non_empty_responses_api_stream_cached():
     mock_redis = AsyncMock()
     cache = CacheManager(mock_redis, ttl=300, cache_enabled=True)
 
+    request_data = {"model": "gpt-4", "input": "Test"}  # responses API identifier
+    writer = await cache.create_streaming_cache_writer(request_data)
+
+    # Send SSE sequence with actual text delta content
+    await writer.write_and_yield("event: response.created\n")
+    await writer.write_and_yield(
+        'data: {"type": "response.created", "response": {"model": "gpt-4"}}\n'
+    )
+    await writer.write_and_yield("\n")  # flush
+
+    await writer.write_and_yield("event: response.output_text.delta\n")
+    await writer.write_and_yield(
+        'data: {"type": "response.output_text.delta", "delta": "Hello, how can I help you?"}\n'
+    )
+    await writer.write_and_yield("\n")  # flush
+
+    await writer.write_and_yield("event: response.completed\n")
+    await writer.write_and_yield(
+        'data: {"type": "response.completed", "response": {"model": "gpt-4"}}\n'
+    )
+    await writer.write_and_yield("\n")  # flush & finalize
+
+    mock_redis.setex.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_responses_api_cached():
+    """Ensure that a non-streaming responses-API result containing text IS cached."""
+
+    mock_redis = AsyncMock()
+    cache = CacheManager(mock_redis, ttl=300, cache_enabled=True)
+
     request_data = {"model": "gpt-4", "input": "Test"}
 
-    # Test non-streaming responses API response format (this should be cached but currently isn't due to bug)
+    # Non-streaming responses API response format
     responses_api_response = {
         "id": "resp_123",
         "object": "response",
