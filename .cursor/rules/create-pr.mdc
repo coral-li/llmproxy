@@ -1,0 +1,34 @@
+---
+description: Mandatory instructions for creating PRs
+globs:
+alwaysApply: false
+---
+# Creating Pull Requests - Mandatory Instructions
+
+## 1. Create Feature Branch
+- Check if we are already on a feature branch.
+- If not, create one with a descriptive name
+
+## 2. Code Quality Verification
+Always run `make all` before creating a PR to ensure:
+- **Black** formatting is applied
+- **isort** import sorting is correct
+- **flake8** linting passes (including complexity checks)
+- **mypy** type checking passes
+- **pytest** all tests pass
+
+## 3. PR Creation Process
+- Always review which files you're adding to prevent committing unwanted files. **Before committing, verify**:
+    - ✅ No dotfiles (`.env`, `.vscode/`, `.idea/`, etc.) unless intentional
+    - ✅ No temporary files (`.tmp`, `.bak`, `~` files, etc.)
+    - ✅ No build artifacts (`__pycache__/`, `*.pyc`, `dist/`, etc.)
+    - ✅ No sensitive data (API keys, passwords, tokens)
+    - ✅ No large binary files unless necessary
+- If appropriate, add unwanted files to .gitignore
+- Create PR via GitHub API
+    - **Clear title** describing the feature/fix
+    - **Comprehensive description** including:
+    - Overview of changes
+    - Configuration examples
+    - Testing notes
+    - Feature checklist with ✅ markers

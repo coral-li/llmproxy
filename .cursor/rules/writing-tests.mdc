@@ -1,0 +1,13 @@
+---
+description: Mandatory rules for writing tests
+globs:
+alwaysApply: false
+---
+# Test Writing Rules
+
+## When the user reports an error:
+1) Write a test that reproduces the error and verify it fails as expected
+2) Fix the issue in the code
+3) Verify that the test we've added no longer fails
+
+Only this approach ensures that the test indeed catches the reported error and that the fix indeed fixes the issue.
