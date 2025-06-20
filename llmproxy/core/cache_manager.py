@@ -2,7 +2,7 @@ import hashlib
 import json
 import time
 import uuid
-from typing import AsyncIterator, Dict, List, Optional, Tuple, Union
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 
 import redis.asyncio as redis
 
@@ -186,11 +186,66 @@ class CacheManager:
         """Return True if the response from the LLM is considered *empty* and therefore should not be cached.
 
         For chat completions style responses (OpenAI compatible) a response is treated as
-        empty when *all* choices are empty – i.e. ``message.content`` or ``text`` is
+        empty when *all* choices are empty – i.e. ``message.content``, ``delta.content``, or ``text`` is
         either ``None`` or the empty string after stripping.  A missing ``choices`` key
         is also interpreted as an empty response.
+
+        For responses API format, checks the ``outputs`` structure for meaningful content.
         """
-        # No choices at all – treat as empty (cannot determine useful content)
+
+        # Check for responses API format first (has 'outputs' instead of 'choices')
+        if "outputs" in response_data:
+            return self._is_empty_responses_api(response_data)
+
+        # Handle chat completions format (has 'choices')
+        return self._is_empty_chat_completions(response_data)
+
+    def _is_empty_responses_api(self, response_data: dict) -> bool:
+        """Check if responses API format response is empty."""
+        outputs = response_data.get("outputs", [])
+        if not isinstance(outputs, list) or len(outputs) == 0:
+            return True
+
+        for output in outputs:
+            if not isinstance(output, dict):
+                continue
+
+            if self._has_meaningful_output_content(output):
+                return False
+
+        # If we reach here, no output had meaningful content
+        return True
+
+    def _has_meaningful_output_content(self, output: dict) -> bool:
+        """Check if a single output item has meaningful content."""
+        output_type = output.get("type")
+
+        if output_type == "message":
+            # Message output format: outputs[].content[].text
+            content_items = output.get("content", [])
+            if isinstance(content_items, list):
+                for content_item in content_items:
+                    if isinstance(content_item, dict):
+                        text_content = content_item.get("text")
+                        if isinstance(text_content, str) and text_content.strip():
+                            return True
+
+        elif output_type in ["text", "output_text"]:
+            # Direct text output
+            text_content = output.get("text")
+            if isinstance(text_content, str) and text_content.strip():
+                return True
+
+        # Additional check for any other potential text fields
+        for field in ["content", "text", "data"]:
+            field_value = output.get(field)
+            if isinstance(field_value, str) and field_value.strip():
+                return True
+
+        return False
+
+    def _is_empty_chat_completions(self, response_data: dict) -> bool:
+        """Check if chat completions format response is empty."""
         if "choices" not in response_data:
             return True
 
@@ -199,28 +254,40 @@ class CacheManager:
             return True
 
         for choice in choices:
-            # Defensive: not all providers include the same shape
-            content: Optional[str] = None
-
-            # Chat completion format { "message": {"content": "..."} }
-            if isinstance(choice, dict):
-                message = (
-                    choice.get("message")
-                    if isinstance(choice.get("message"), dict)
-                    else None
-                )
-                if message is not None:
-                    content = message.get("content")
-                # Legacy / completions format uses "text"
-                if content is None:
-                    content = choice.get("text")
-
-            # If *any* choice contains non-empty content we deem the response useful
-            if isinstance(content, str) and content.strip():
+            if self._has_meaningful_choice_content(choice):
                 return False
 
         # Reaching here means no choice had meaningful content
         return True
+
+    def _has_meaningful_choice_content(self, choice: Any) -> bool:
+        """Check if a single choice has meaningful content."""
+        if not isinstance(choice, dict):
+            return False
+
+        content: Optional[str] = None
+
+        # Chat completion format { "message": {"content": "..."} }
+        message = (
+            choice.get("message") if isinstance(choice.get("message"), dict) else None
+        )
+        if message is not None:
+            content = message.get("content")
+
+        # Streaming chat completion format { "delta": {"content": "..."} }
+        if content is None:
+            delta = (
+                choice.get("delta") if isinstance(choice.get("delta"), dict) else None
+            )
+            if delta is not None:
+                content = delta.get("content")
+
+        # Legacy / completions format uses "text"
+        if content is None:
+            content = choice.get("text")
+
+        # If this choice contains non-empty content we deem it meaningful
+        return isinstance(content, str) and bool(content.strip())
 
     async def set(self, request_data: dict, response_data: dict) -> None:
         """Cache response for non-streaming requests"""
