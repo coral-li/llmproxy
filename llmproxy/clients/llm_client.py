@@ -72,6 +72,49 @@ class LLMClient:
         else:
             return await self._request(url, headers, params, request_data)
 
+    async def create_embedding(
+        self,
+        model: str,
+        endpoint_url: str,
+        api_key: str,
+        request_data: dict,
+        default_query: Optional[dict] = None,
+    ) -> dict:
+        """Make embedding request to OpenAI-compatible endpoint"""
+
+        # Prepare headers
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        # Handle Azure OpenAI query parameters
+        params = default_query or {}
+
+        # Build full URL
+        if endpoint_url.endswith("/"):
+            endpoint_url = endpoint_url[:-1]
+
+        # Detect Azure OpenAI endpoints
+        is_azure = endpoint_url.endswith("azure.com")
+
+        if is_azure:
+            url = urljoin(
+                endpoint_url + "/",
+                f"openai/deployments/{model}/embeddings",
+            )
+        else:
+            # Standard OpenAI URL
+            url = urljoin(endpoint_url + "/", "v1/embeddings")
+
+        logger.debug(
+            "llm_embedding_request",
+            url=url,
+            model=request_data.get("model"),
+        )
+
+        return await self._request(url, headers, params, request_data)
+
     async def _request(self, url: str, headers: dict, params: dict, data: dict) -> dict:
         """Make non-streaming request"""
         request_start_time = time.time()

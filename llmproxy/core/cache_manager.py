@@ -191,14 +191,46 @@ class CacheManager:
         is also interpreted as an empty response.
 
         For responses API format, checks the ``outputs`` structure for meaningful content.
+
+        For embeddings API format, checks if the response has valid embeddings data.
         """
 
         # Check for responses API format first (has 'outputs' instead of 'choices')
         if "outputs" in response_data:
             return self._is_empty_responses_api(response_data)
 
+        # Check for embeddings API format (has 'data' with embedding objects)
+        if self._is_embeddings_response(response_data):
+            return self._is_empty_embeddings(response_data)
+
         # Handle chat completions format (has 'choices')
         return self._is_empty_chat_completions(response_data)
+
+    def _is_embeddings_response(self, response_data: dict) -> bool:
+        """Check if this is an embeddings API response format."""
+        return (
+            response_data.get("object") == "list"
+            and "data" in response_data
+            and isinstance(response_data.get("data"), list)
+            and len(response_data.get("data", [])) > 0
+            and response_data.get("data", [{}])[0].get("object") == "embedding"
+        )
+
+    def _is_empty_embeddings(self, response_data: dict) -> bool:
+        """Check if embeddings response is empty."""
+        data = response_data.get("data", [])
+        if not isinstance(data, list) or len(data) == 0:
+            return True
+
+        # Check if any embedding data exists
+        for item in data:
+            if isinstance(item, dict):
+                embedding = item.get("embedding")
+                if isinstance(embedding, list) and len(embedding) > 0:
+                    return False
+
+        # No meaningful embedding data found
+        return True
 
     def _is_empty_responses_api(self, response_data: dict) -> bool:
         """Check if responses API format response is empty."""
