@@ -220,15 +220,23 @@ class CacheManager:
         """Check if embeddings response is empty."""
         data = response_data.get("data", [])
         if not isinstance(data, list) or len(data) == 0:
+            logger.error(
+                "empty_embeddings_response data is not a list",
+                response_data=response_data,
+            )
             return True
 
         # Check if any embedding data exists
         for item in data:
             if isinstance(item, dict):
                 embedding = item.get("embedding")
-                if isinstance(embedding, list) and len(embedding) > 0:
+                if embedding is not None:
                     return False
 
+        logger.error(
+            "empty_embeddings_response no meaningful embedding data found",
+            response_data=response_data,
+        )
         # No meaningful embedding data found
         return True
 
