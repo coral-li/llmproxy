@@ -9,24 +9,24 @@ model_groups:
       - model: gpt-4o-mini
         weight: 1
         params:
-          api_key: os.environ/AZURE_OPENAI_API_KEY_O4_MINI_1
-          base_url: os.environ/AZURE_OPENAI_ENDPOINT_O4_MINI_1
+          api_key: "dummy"
+          base_url: "https://dummy.com"
           api_version: "2024-02-15-preview"
 
       # Azure OpenAI endpoint 2 (backup)
       - model: gpt-4o-mini
         weight: 1
         params:
-          api_key: os.environ/AZURE_OPENAI_API_KEY_O4_MINI_2
-          base_url: os.environ/AZURE_OPENAI_ENDPOINT_O4_MINI_2
+          api_key: "dummy"
+          base_url: "https://dummy.com"
           api_version: "2024-02-15-preview"
 
       # OpenAI fallback (weight 0 = only used when others fail)
       - model: gpt-4o-mini
         weight: 0
         params:
-          api_key: os.environ/OPENAI_API_KEY
-          base_url: https://api.openai.com
+          api_key: "dummy"
+          base_url: "https://dummy.com"
 
   # Example model group for GPT-4
   - model_group: gpt-4
@@ -34,15 +34,15 @@ model_groups:
       - model: gpt-4
         weight: 1
         params:
-          api_key: os.environ/AZURE_OPENAI_API_KEY_GPT_4_1
-          base_url: os.environ/AZURE_OPENAI_ENDPOINT_GPT_4_1
+          api_key: "dummy"
+          base_url: "https://dummy.com"
           api_version: "2024-02-15-preview"
 
       - model: gpt-4
         weight: 0
         params:
-          api_key: os.environ/OPENAI_API_KEY
-          base_url: https://api.openai.com
+          api_key: "dummy"
+          base_url: "https://dummy.com"
 
 general_settings:
   bind_address: localhost
@@ -52,17 +52,16 @@ general_settings:
   cooldown_time: 60 # cooldown time for each endpoint
 
   # Redis will be used to store the cache and the state of the endpoints
-  redis_host: os.environ/REDIS_HOST
-  redis_port: os.environ/REDIS_PORT
-  redis_password: os.environ/REDIS_PASSWORD
-  redis_ssl: os.environ/REDIS_SSL  # Set to 'true' for SSL connections
-  redis_ssl_cert_reqs: os.environ/REDIS_SSL_CERT_REQS  # Options: "required", "optional", "none"
+  redis_host: "127.0.0.1"
+  redis_port: 6379
+  redis_password: "dummy"
+  redis_ssl: "false" # Set to 'true' for SSL connections
 
   cache: True # enable cache
-  cache_params:        # set cache params for redis
+  cache_params: # set cache params for redis
     type: redis
     ttl: 604800 # 7 days
     namespace: "llmproxy.cache"
-    host: os.environ/REDIS_HOST
-    port: os.environ/REDIS_PORT
-    password: os.environ/REDIS_PASSWORD
+    host: "127.0.0.1"
+    port: 6379
+    password: "dummy"
