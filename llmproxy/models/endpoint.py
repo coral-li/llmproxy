@@ -33,12 +33,13 @@ class Endpoint:
 
     def _generate_deterministic_id(self, model: str, params: dict) -> str:
         """Generate a deterministic ID based on model and key parameters"""
-        # Include key identifying params but exclude API keys for security
+        # Include key identifying params including API key
         id_data = {
             "model": model,
             "base_url": params.get("base_url", "openai"),
             "deployment": params.get("deployment"),  # Azure deployment name
             "api_version": params.get("api_version"),  # Azure API version
+            "api_key": params.get("api_key"),
         }
 
         # Remove None values

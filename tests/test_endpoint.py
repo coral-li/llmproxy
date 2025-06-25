@@ -88,15 +88,25 @@ class TestEndpoint:
         """Test that ID generation is deterministic"""
         params1 = {"api_key": "test-key", "base_url": "https://api.openai.com"}
         params2 = {
-            "api_key": "different-key",  # Different API key
+            "api_key": "test-key",  # Same API key
             "base_url": "https://api.openai.com",
         }
 
         endpoint1 = Endpoint(model="gpt-3.5-turbo", weight=1, params=params1)
         endpoint2 = Endpoint(model="gpt-3.5-turbo", weight=1, params=params2)
 
-        # IDs should be the same because API key is excluded from ID generation
+        # IDs should be the same because all parameters are identical
         assert endpoint1.id == endpoint2.id
+
+        # Test that different API keys produce different IDs
+        params3 = {
+            "api_key": "different-key",  # Different API key
+            "base_url": "https://api.openai.com",
+        }
+        endpoint3 = Endpoint(model="gpt-3.5-turbo", weight=1, params=params3)
+
+        # IDs should be different because API key is included in ID generation
+        assert endpoint1.id != endpoint3.id
 
     def test_deterministic_id_different_models(self):
         """Test that different models generate different IDs"""
@@ -126,7 +136,7 @@ class TestEndpoint:
             "api_version": "2024-02-15-preview",
         }
         params2 = {
-            "api_key": "different-key",
+            "api_key": "test-key",  # Same API key
             "base_url": "https://myresource.openai.azure.com",
             "deployment": "gpt-35-turbo",
             "api_version": "2024-02-15-preview",
@@ -135,8 +145,20 @@ class TestEndpoint:
         endpoint1 = Endpoint(model="gpt-3.5-turbo", weight=1, params=params1)
         endpoint2 = Endpoint(model="gpt-3.5-turbo", weight=1, params=params2)
 
-        # Should have same ID despite different API keys
+        # Should have same ID because all parameters are identical
         assert endpoint1.id == endpoint2.id
+
+        # Test that different API keys produce different IDs
+        params3 = {
+            "api_key": "different-key",
+            "base_url": "https://myresource.openai.azure.com",
+            "deployment": "gpt-35-turbo",
+            "api_version": "2024-02-15-preview",
+        }
+        endpoint3 = Endpoint(model="gpt-3.5-turbo", weight=1, params=params3)
+
+        # Should have different ID due to different API key
+        assert endpoint1.id != endpoint3.id
 
     def test_deterministic_id_different_deployments(self):
         """Test that different Azure deployments generate different IDs"""
@@ -228,12 +250,13 @@ class TestEndpoint:
         }
         endpoint = Endpoint(model="gpt-3.5-turbo", weight=1, params=params)
 
-        # Manually calculate expected ID
+        # Manually calculate expected ID (now includes API key)
         id_data = {
             "model": "gpt-3.5-turbo",
             "base_url": "https://api.openai.com",
             "deployment": "test-deployment",
             "api_version": "2024-02-15",
+            "api_key": "test-key",
         }
         id_str = json.dumps(id_data, sort_keys=True)
         expected_id = hashlib.sha256(id_str.encode()).hexdigest()[:16]
