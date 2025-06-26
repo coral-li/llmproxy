@@ -408,7 +408,6 @@ class CacheManager:
                 logger.info(
                     "cache_skip_empty_response",
                     request_summary={"model": request_data.get("model")},
-                    response_data=response_data,
                 )
                 return
         except Exception as e:
