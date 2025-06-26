@@ -395,3 +395,155 @@ async def test_malformed_response_structure_handled():
 
     await cache.set(request_data, response)
     mock_redis.setex.assert_not_called()  # Should not cache malformed responses
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_with_tool_calls_not_empty():
+    """Test that chat completions with tool calls are NOT considered empty.
+
+    This test reproduces a bug where responses containing tool calls (but with
+    content=None) are incorrectly detected as empty and not cached.
+
+    This test should initially FAIL, confirming the bug exists.
+    """
+    mock_redis = AsyncMock()
+    cache = CacheManager(mock_redis, ttl=300, cache_enabled=True)
+
+    request_data = {"model": "gpt-4.1"}
+
+    # Response structure based on the actual logged response that was incorrectly
+    # detected as empty. The key issue is that message.content is None, but
+    # message.tool_calls contains meaningful data.
+    response_with_tool_calls = {
+        "choices": [
+            {
+                "content_filter_results": {},
+                "finish_reason": "stop",
+                "index": 0,
+                "logprobs": None,
+                "message": {
+                    "annotations": [],
+                    "content": None,  # This is None, but tool_calls has data
+                    "refusal": None,
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "arguments": '{"reasoning_steps":"1. The requested unit is \'kgCO2e/kg net weight\'.\\n2. The key components are: \'kgCO2e\' (kilograms of CO2 equivalent) per \'kg\' (kilogram) of net weight.","name":"kgCO₂e/kg","correct_spelling":null}',
+                                "name": "UnitModel",
+                            },
+                            "id": "call_h7vv9rtj5FqGx61Yu9WmkOz9",
+                            "type": "function",
+                        }
+                    ],
+                },
+            }
+        ],
+        "created": 1750916828,
+        "id": "chatcmpl-BmZjwyYeGJ4RA1s0FCpmzU10P34VR",
+        "model": "gpt-4.1-2025-04-14",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_07e970ab25",
+        "usage": {"completion_tokens": 274, "prompt_tokens": 493, "total_tokens": 767},
+    }
+
+    # This response should NOT be considered empty because it contains tool calls
+    # Currently this will fail because _is_empty_response incorrectly returns True
+    is_empty = cache._is_empty_response(response_with_tool_calls)
+    assert not is_empty, "Response with tool calls should not be considered empty"
+
+    # The response should be cached (not skipped)
+    await cache.set(request_data, response_with_tool_calls)
+    mock_redis.setex.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_with_function_call_not_empty():
+    """Test that chat completions with legacy function_call are NOT considered empty.
+
+    This tests the legacy function_call format (single function call) in addition
+    to the newer tool_calls format (multiple function calls).
+    """
+    mock_redis = AsyncMock()
+    cache = CacheManager(mock_redis, ttl=300, cache_enabled=True)
+
+    request_data = {"model": "gpt-3.5-turbo"}
+
+    # Legacy function_call format response
+    response_with_function_call = {
+        "choices": [
+            {
+                "finish_reason": "function_call",
+                "index": 0,
+                "message": {
+                    "content": None,  # Content is None
+                    "role": "assistant",
+                    "function_call": {  # But function_call has data
+                        "arguments": '{"location": "Boston, MA"}',
+                        "name": "get_current_weather",
+                    },
+                },
+            }
+        ],
+        "created": 1677652288,
+        "id": "chatcmpl-123",
+        "model": "gpt-3.5-turbo-0613",
+        "object": "chat.completion",
+        "usage": {"completion_tokens": 17, "prompt_tokens": 57, "total_tokens": 74},
+    }
+
+    # This response should NOT be considered empty because it contains a function call
+    is_empty = cache._is_empty_response(response_with_function_call)
+    assert not is_empty, "Response with function call should not be considered empty"
+
+    # The response should be cached (not skipped)
+    await cache.set(request_data, response_with_function_call)
+    mock_redis.setex.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_streaming_chat_completion_with_tool_calls_not_empty():
+    """Test that streaming chat completions with tool calls in delta are NOT considered empty."""
+    mock_redis = AsyncMock()
+    cache = CacheManager(mock_redis, ttl=300, cache_enabled=True)
+
+    request_data = {"model": "gpt-4", "stream": True}
+
+    # Streaming response with tool calls in delta
+    streaming_response_with_tool_calls = {
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": None,  # Content is None
+                    "tool_calls": [  # But delta has tool_calls
+                        {
+                            "index": 0,
+                            "id": "call_abc123",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": '{"location": "New York"}',
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": None,
+            }
+        ],
+        "created": 1677652288,
+        "id": "chatcmpl-123",
+        "model": "gpt-4-0613",
+        "object": "chat.completion.chunk",
+    }
+
+    # This response should NOT be considered empty because it contains tool calls in delta
+    is_empty = cache._is_empty_response(streaming_response_with_tool_calls)
+    assert (
+        not is_empty
+    ), "Streaming response with tool calls in delta should not be considered empty"
+
+    # The response should be cached (not skipped)
+    await cache.set(request_data, streaming_response_with_tool_calls)
+    mock_redis.setex.assert_called_once()

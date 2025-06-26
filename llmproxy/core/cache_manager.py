@@ -314,6 +314,20 @@ class CacheManager:
         if message is not None:
             content = message.get("content")
 
+            # Check for tool calls in message (modern format)
+            tool_calls = message.get("tool_calls")
+            if self._has_meaningful_tool_calls(tool_calls):
+                logger.debug("meaningful_content_detected", reason="message.tool_calls")
+                return True
+
+            # Check for function call in message (legacy format)
+            function_call = message.get("function_call")
+            if self._has_meaningful_function_call(function_call):
+                logger.debug(
+                    "meaningful_content_detected", reason="message.function_call"
+                )
+                return True
+
         # Streaming chat completion format { "delta": {"content": "..."} }
         if content is None:
             delta = (
@@ -322,12 +336,62 @@ class CacheManager:
             if delta is not None:
                 content = delta.get("content")
 
+                # Check for tool calls in delta (streaming format)
+                tool_calls = delta.get("tool_calls")
+                if self._has_meaningful_tool_calls(tool_calls):
+                    logger.debug(
+                        "meaningful_content_detected", reason="delta.tool_calls"
+                    )
+                    return True
+
+                # Check for function call in delta (streaming legacy format)
+                function_call = delta.get("function_call")
+                if self._has_meaningful_function_call(function_call):
+                    logger.debug(
+                        "meaningful_content_detected", reason="delta.function_call"
+                    )
+                    return True
+
         # Legacy / completions format uses "text"
         if content is None:
             content = choice.get("text")
 
         # If this choice contains non-empty content we deem it meaningful
-        return isinstance(content, str) and bool(content.strip())
+        if isinstance(content, str) and bool(content.strip()):
+            logger.debug("meaningful_content_detected", reason="textual_content")
+            return True
+
+        return False
+
+    def _has_meaningful_tool_calls(self, tool_calls: Any) -> bool:
+        """Check if tool_calls contains meaningful data."""
+        if not isinstance(tool_calls, list) or len(tool_calls) == 0:
+            return False
+
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+
+            # Check if tool call has meaningful function data
+            function = tool_call.get("function")
+            if isinstance(function, dict):
+                # Must have a function name
+                if function.get("name"):
+                    return True
+
+            # Check if tool call has other meaningful data (type, id, etc.)
+            if tool_call.get("type") or tool_call.get("id"):
+                return True
+
+        return False
+
+    def _has_meaningful_function_call(self, function_call: Any) -> bool:
+        """Check if function_call contains meaningful data (legacy format)."""
+        if not isinstance(function_call, dict):
+            return False
+
+        # Must have a function name to be meaningful
+        return bool(function_call.get("name"))
 
     async def set(self, request_data: dict, response_data: dict) -> None:
         """Cache response for non-streaming requests"""
@@ -344,6 +408,7 @@ class CacheManager:
                 logger.info(
                     "cache_skip_empty_response",
                     request_summary={"model": request_data.get("model")},
+                    response_data=response_data,
                 )
                 return
         except Exception as e:
