@@ -130,10 +130,8 @@ class LLMClient:
                 url=url,
                 headers=sanitized_headers,
                 params=params,
-                request_body_sample=(
-                    str(data)[:500] if data else None
-                ),  # First 500 chars of request
                 model=data.get("model") if data else None,
+                request_size=len(json.dumps(data)) if data else 0,
             )
 
             response = await self.client.post(
@@ -158,7 +156,6 @@ class LLMClient:
                         url=url,
                         status_code=response.status_code,
                         json_error=str(json_error),
-                        response_text=error[:500],  # First 500 chars
                         duration_ms=request_duration_ms,
                     )
                     return {
@@ -185,7 +182,6 @@ class LLMClient:
                     logger.error(
                         "llm_request_server_error",
                         **error_details,
-                        request_body=data,  # Include full request for 500 errors
                     )
                 # For vague 400 errors, log request details to help debugging
                 elif (
@@ -266,7 +262,7 @@ class LLMClient:
             "method": "POST",
             "duration_ms": request_duration_ms,
             "response_headers": dict(response.headers),
-            "error_body": error,
+            "error_size": len(error) if error else 0,
             "request_model": data.get("model") if data else None,
             "request_size": len(json.dumps(data)) if data else 0,
         }
@@ -281,40 +277,10 @@ class LLMClient:
         }
         if data:
             if "messages" in data:
-                messages_summary = []
-                for msg in data.get("messages", [])[:5]:
-                    msg_summary = {
-                        "role": msg.get("role"),
-                        "content_preview": (
-                            str(msg.get("content", ""))[:200] + "..."
-                            if len(str(msg.get("content", ""))) > 200
-                            else str(msg.get("content", ""))
-                        ),
-                    }
-                    messages_summary.append(msg_summary)
-                debug_details["messages_preview"] = messages_summary
                 debug_details["total_messages"] = len(data.get("messages", []))
             if "input" in data:
                 input_data = data.get("input", [])
                 if isinstance(input_data, list):
-                    input_summary = []
-                    for inp in input_data[:3]:
-                        if isinstance(inp, dict):
-                            inp_summary = {
-                                "role": inp.get("role"),
-                                "content_types": (
-                                    [c.get("type") for c in inp.get("content", [])]
-                                    if isinstance(inp.get("content"), list)
-                                    else None
-                                ),
-                                "content_preview": (
-                                    str(inp)[:200] + "..."
-                                    if len(str(inp)) > 200
-                                    else str(inp)
-                                ),
-                            }
-                            input_summary.append(inp_summary)
-                    debug_details["input_preview"] = input_summary
                     debug_details["total_inputs"] = len(input_data)
             debug_details["parameters"] = {
                 "temperature": data.get("temperature"),
@@ -430,7 +396,7 @@ class LLMClient:
             "method": "POST",
             "duration_ms": duration_ms,
             "response_headers": dict(response.headers),
-            "error_body": error_text.decode(),
+            "error_size": len(error_text) if error_text else 0,
             "request_model": data.get("model") if data else None,
             "streaming": True,
         }
@@ -458,7 +424,6 @@ class LLMClient:
                 logger.error(
                     "llm_stream_server_error",
                     **error_details,
-                    request_body=data,
                 )
             elif resp.status_code == 400 and (
                 "check your inputs" in error_text.decode().lower()
@@ -469,18 +434,6 @@ class LLMClient:
                     "request_id": resp.headers.get("x-request-id"),
                 }
                 if data and "messages" in data:
-                    messages_summary = []
-                    for msg in data.get("messages", [])[:5]:
-                        msg_summary = {
-                            "role": msg.get("role"),
-                            "content_preview": (
-                                str(msg.get("content", ""))[:200] + "..."
-                                if len(str(msg.get("content", ""))) > 200
-                                else str(msg.get("content", ""))
-                            ),
-                        }
-                        messages_summary.append(msg_summary)
-                    debug_details["messages_preview"] = messages_summary
                     debug_details["total_messages"] = len(data.get("messages", []))
                 logger.error("llm_stream_vague_error", **debug_details)
             else:
@@ -519,7 +472,7 @@ class LLMClient:
                             return []
                 return [line + "\n\n"]
             except json.JSONDecodeError:
-                logger.debug(f"Could not parse chunk, forwarding as-is: {line}")
+                logger.debug("Could not parse chunk, forwarding as-is")
                 return [line + "\n\n"]
         elif line:
             return [line + "\n\n"]
@@ -596,7 +549,7 @@ class LLMClient:
                     logger.error(
                         "llm_response_stream_error",
                         status_code=resp.status_code,
-                        error=error_text.decode()[:500],
+                        error_size=len(error_text) if error_text else 0,
                         duration_ms=duration_ms,
                     )
                 finally:
