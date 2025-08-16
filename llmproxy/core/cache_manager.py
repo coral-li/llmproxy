@@ -67,61 +67,11 @@ class CacheManager:
 
     def _generate_cache_key(self, request_data: dict) -> str:
         """Generate cache key from request parameters"""
-        # Extract relevant fields for caching
-        raw_cache_data = {
-            "model": request_data.get("model"),
-            # Handle both chat completions (messages) and responses API (input)
-            "messages": request_data.get("messages"),
-            "input": request_data.get("input"),
-            # Responses API specific fields
-            "instructions": request_data.get("instructions"),
-            "previous_response_id": request_data.get("previous_response_id"),
-            "temperature": request_data.get("temperature"),
-            "max_tokens": request_data.get("max_tokens"),
-            "max_output_tokens": request_data.get("max_output_tokens"),
-            "max_completion_tokens": request_data.get("max_completion_tokens"),
-            "top_p": request_data.get("top_p"),
-            "frequency_penalty": request_data.get("frequency_penalty"),
-            "presence_penalty": request_data.get("presence_penalty"),
-            "tools": request_data.get("tools"),
-            "tool_choice": request_data.get("tool_choice"),
-            "seed": request_data.get("seed"),
-        }
-
-        # Remove None values
-        filtered = {k: v for k, v in raw_cache_data.items() if v is not None}
-
-        # Normalize numerics so 0 and 0.0 (and other integral floats) hash identically
-        def _normalize_value(val: Any) -> Any:
-            if isinstance(val, float) and val.is_integer():
-                return int(val)
-            # Normalize lists/dicts recursively (e.g., tools or nested content)
-            if isinstance(val, list):
-                return [_normalize_value(x) for x in val]
-            if isinstance(val, dict):
-                return {k: _normalize_value(v) for k, v in val.items()}
-            return val
-
-        cache_data = {k: _normalize_value(v) for k, v in filtered.items()}
-
         # Create deterministic hash
-        cache_str = json.dumps(cache_data, sort_keys=True)
+        cache_str = json.dumps(request_data, sort_keys=True, indent=2)
         cache_hash = hashlib.sha256(cache_str.encode()).hexdigest()
 
         key = f"{self.namespace}:{cache_hash}"
-
-        # Enhanced debug logging
-        logger.debug(
-            "cache_key_generated",
-            key=key,
-            request_summary={
-                "model": request_data.get("model"),
-                "has_messages": bool(request_data.get("messages")),
-                "has_input": bool(request_data.get("input")),
-                "has_instructions": bool(request_data.get("instructions")),
-                "temperature": cache_data.get("temperature"),
-            },
-        )
 
         return key
 
