@@ -237,15 +237,20 @@ async def clear_cache() -> Dict[str, Any]:
         )
 
     try:
-        redis_client = redis_manager.get_client()
-        # Get all keys in the cache namespace
-        keys = await redis_client.keys("llmproxy:*")
+        if cache_manager is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Cache manager not available",
+            )
 
-        deleted_count = 0
-        if keys:
-            deleted_count = await redis_client.delete(*keys)
+        # Delegate to CacheManager's safe implementation (SCAN + batched UNLINK/DEL)
+        deleted_count = await cache_manager.invalidate_all()
 
-        logger.info("cache_cleared", deleted_entries=deleted_count)
+        logger.info(
+            "cache_cleared",
+            deleted_entries=deleted_count,
+            method="cache_manager.invalidate_all",
+        )
 
         return {
             "timestamp": datetime.utcnow().isoformat(),

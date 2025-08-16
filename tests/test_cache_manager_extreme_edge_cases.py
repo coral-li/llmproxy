@@ -220,23 +220,7 @@ class TestCacheManagerExtremeEdgeCases:
         for writer in writers:
             assert isinstance(writer, StreamingCacheWriter)
 
-    @pytest.mark.asyncio
-    async def test_invalidate_request_with_key_generation_failure(
-        self, cache_manager, mock_redis
-    ):
-        """Test cache invalidation when key generation fails"""
-        # Create a request that might cause key generation to fail
-        problematic_request = {
-            "model": "gpt-3.5-turbo",
-            "messages": [
-                {"role": "user", "content": object()}
-            ],  # Non-serializable object
-        }
-
-        # Should handle gracefully without raising
-        result = await cache_manager.invalidate_request(problematic_request)
-        # Result should be False due to error
-        assert result is False
+    # invalidate_request has been removed; the key generation failure test is no longer applicable
 
     @pytest.mark.asyncio
     async def test_invalidate_all_with_redis_scan_failure(
