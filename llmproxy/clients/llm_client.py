@@ -1,6 +1,6 @@
 import json
 import time
-from typing import AsyncIterator, Optional, Union
+from typing import AsyncContextManager, AsyncIterator, Optional, Union
 from urllib.parse import urljoin
 
 import httpx
@@ -349,75 +349,32 @@ class LLMClient:
         )
 
         try:
-            response = self.client.stream(
+            # Open the stream ONCE and decide based on status code
+            response_cm = self.client.stream(
                 "POST", url, headers=headers, params=params, json=data
             )
 
-            # Check if it's an error by peeking at the response
-            # We'll handle the actual streaming in a wrapper
-            async with response as resp:
-                if resp.status_code != 200:
-                    error_text = await resp.aread()
-                    error_details, duration_ms = self._handle_stream_error(
-                        resp, error_text, data, request_start_time, url
-                    )
-                    if resp.status_code >= 500:
-                        logger.error(
-                            "llm_stream_server_error",
-                            **error_details,
-                            request_body=data,  # Include full request for 500 errors
-                        )
-                    elif resp.status_code == 400 and (
-                        "check your inputs" in error_text.decode().lower()
-                        or "invalid_request_error" in error_text.decode()
-                    ):
-                        debug_details = {
-                            **error_details,
-                            "request_id": resp.headers.get("x-request-id"),
-                        }
-                        if data and "messages" in data:
-                            messages_summary = []
-                            for msg in data.get("messages", [])[:5]:
-                                msg_summary = {
-                                    "role": msg.get("role"),
-                                    "content_preview": (
-                                        str(msg.get("content", ""))[:200] + "..."
-                                        if len(str(msg.get("content", ""))) > 200
-                                        else str(msg.get("content", ""))
-                                    ),
-                                }
-                                messages_summary.append(msg_summary)
-                            debug_details["messages_preview"] = messages_summary
-                            debug_details["total_messages"] = len(
-                                data.get("messages", [])
-                            )
-                        logger.error(
-                            "llm_stream_vague_error",
-                            **debug_details,
-                        )
-                    else:
-                        logger.error(
-                            "llm_stream_error",
-                            **error_details,
-                        )
+            # Manually manage the async context so we can reuse the same response
+            resp = await response_cm.__aenter__()
 
-                    # Return error dict instead of yielding error chunks
-                    return {
-                        "status_code": resp.status_code,
-                        "headers": dict(resp.headers),
-                        "data": None,
-                        "error": error_text.decode(),
-                        "duration_ms": duration_ms,
-                    }
+            if resp.status_code != 200:
+                return await self._process_stream_error_response(
+                    resp=resp,
+                    data=data,
+                    request_start_time=request_start_time,
+                    url=url,
+                    response_cm=response_cm,
+                )
 
-            # Success - return a generator that manages its own context
+            # Success - return a generator that iterates the SAME response
             async def stream_response() -> AsyncIterator[str]:
-                async with self.client.stream(
-                    "POST", url, headers=headers, params=params, json=data
-                ) as response:
-                    async for line in response.aiter_lines():
+                try:
+                    async for line in resp.aiter_lines():
                         for chunk in self._filter_and_yield_chunk(line):
                             yield chunk
+                finally:
+                    # Close the original response when the consumer is done
+                    await response_cm.__aexit__(None, None, None)
 
             return stream_response()
 
@@ -478,6 +435,66 @@ class LLMClient:
             "streaming": True,
         }
         return error_details, duration_ms
+
+    async def _process_stream_error_response(
+        self,
+        resp: httpx.Response,
+        data: Optional[dict],
+        request_start_time: float,
+        url: str,
+        response_cm: AsyncContextManager[httpx.Response],
+    ) -> dict:
+        """Handle non-200 streaming responses consistently and close the stream.
+
+        This centralizes logging and response formatting, and ensures the opened
+        stream context is properly closed before returning.
+        """
+        error_text = await resp.aread()
+        try:
+            error_details, duration_ms = self._handle_stream_error(
+                resp, error_text, data, request_start_time, url
+            )
+            if resp.status_code >= 500:
+                logger.error(
+                    "llm_stream_server_error",
+                    **error_details,
+                    request_body=data,
+                )
+            elif resp.status_code == 400 and (
+                "check your inputs" in error_text.decode().lower()
+                or "invalid_request_error" in error_text.decode()
+            ):
+                debug_details = {
+                    **error_details,
+                    "request_id": resp.headers.get("x-request-id"),
+                }
+                if data and "messages" in data:
+                    messages_summary = []
+                    for msg in data.get("messages", [])[:5]:
+                        msg_summary = {
+                            "role": msg.get("role"),
+                            "content_preview": (
+                                str(msg.get("content", ""))[:200] + "..."
+                                if len(str(msg.get("content", ""))) > 200
+                                else str(msg.get("content", ""))
+                            ),
+                        }
+                        messages_summary.append(msg_summary)
+                    debug_details["messages_preview"] = messages_summary
+                    debug_details["total_messages"] = len(data.get("messages", []))
+                logger.error("llm_stream_vague_error", **debug_details)
+            else:
+                logger.error("llm_stream_error", **error_details)
+        finally:
+            await response_cm.__aexit__(None, None, None)
+
+        return {
+            "status_code": resp.status_code,
+            "headers": dict(resp.headers),
+            "data": None,
+            "error": error_text.decode(),
+            "duration_ms": duration_ms,
+        }
 
     def _filter_and_yield_chunk(self, line: str) -> list:
         if line and line.startswith("data: "):
@@ -565,50 +582,50 @@ class LLMClient:
         request_start_time = time.time()
 
         try:
-            response = self.client.stream(
+            # Open the stream ONCE and decide based on status code
+            response_cm = self.client.stream(
                 "POST", url, headers=headers, params=params, json=data
             )
 
-            # Check if it's an error by peeking at the response
-            async with response as resp:
-                if resp.status_code != 200:
-                    error_text = await resp.aread()
-                    duration_ms = int((time.time() - request_start_time) * 1000)
+            resp = await response_cm.__aenter__()
+
+            if resp.status_code != 200:
+                error_text = await resp.aread()
+                duration_ms = int((time.time() - request_start_time) * 1000)
+                try:
                     logger.error(
                         "llm_response_stream_error",
                         status_code=resp.status_code,
                         error=error_text.decode()[:500],
                         duration_ms=duration_ms,
                     )
+                finally:
+                    await response_cm.__aexit__(None, None, None)
 
-                    # Return error dict instead of yielding error chunks
-                    return {
-                        "status_code": resp.status_code,
-                        "headers": dict(resp.headers),
-                        "data": None,
-                        "error": error_text.decode(),
-                        "duration_ms": duration_ms,
-                    }
+                return {
+                    "status_code": resp.status_code,
+                    "headers": dict(resp.headers),
+                    "data": None,
+                    "error": error_text.decode(),
+                    "duration_ms": duration_ms,
+                }
 
-            # Success - return a generator that manages its own context
+            # Success - return a generator that iterates the SAME response
             async def stream_response() -> AsyncIterator[str]:
-                async with self.client.stream(
-                    "POST", url, headers=headers, params=params, json=data
-                ) as response:
+                try:
                     # Stream the response line by line for proper event parsing
-                    # The responses API uses event-based SSE format that needs line-by-line processing
-                    async for line in response.aiter_lines():
+                    async for line in resp.aiter_lines():
                         # Yield each line with proper newline formatting
                         if line:
-                            # Non-empty lines get a single newline
                             yield line + "\n"
                         else:
-                            # Empty lines indicate event boundary, add another newline
                             yield "\n"
 
                         # Log event lines for debugging
                         if line.startswith("event: "):
                             logger.debug("response_api_event_line", event_line=line)
+                finally:
+                    await response_cm.__aexit__(None, None, None)
 
             return stream_response()
 
