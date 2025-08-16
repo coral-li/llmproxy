@@ -49,12 +49,6 @@ class Endpoint:
 
         # Create deterministic hash
         id_str = json.dumps(id_data, sort_keys=True)
-        logger.info(
-            "_generate_deterministic_id",
-            params=params,
-            id_data=id_data,
-            id_str=id_str,
-        )
 
         return hashlib.sha256(id_str.encode()).hexdigest()[:16]
 
