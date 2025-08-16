@@ -68,7 +68,7 @@ class CacheManager:
     def _generate_cache_key(self, request_data: dict) -> str:
         """Generate cache key from request parameters"""
         # Extract relevant fields for caching
-        cache_data = {
+        raw_cache_data = {
             "model": request_data.get("model"),
             # Handle both chat completions (messages) and responses API (input)
             "messages": request_data.get("messages"),
@@ -89,7 +89,20 @@ class CacheManager:
         }
 
         # Remove None values
-        cache_data = {k: v for k, v in cache_data.items() if v is not None}
+        filtered = {k: v for k, v in raw_cache_data.items() if v is not None}
+
+        # Normalize numerics so 0 and 0.0 (and other integral floats) hash identically
+        def _normalize_value(val: Any) -> Any:
+            if isinstance(val, float) and val.is_integer():
+                return int(val)
+            # Normalize lists/dicts recursively (e.g., tools or nested content)
+            if isinstance(val, list):
+                return [_normalize_value(x) for x in val]
+            if isinstance(val, dict):
+                return {k: _normalize_value(v) for k, v in val.items()}
+            return val
+
+        cache_data = {k: _normalize_value(v) for k, v in filtered.items()}
 
         # Create deterministic hash
         cache_str = json.dumps(cache_data, sort_keys=True)
@@ -106,7 +119,7 @@ class CacheManager:
                 "has_messages": bool(request_data.get("messages")),
                 "has_input": bool(request_data.get("input")),
                 "has_instructions": bool(request_data.get("instructions")),
-                "temperature": request_data.get("temperature"),
+                "temperature": cache_data.get("temperature"),
             },
         )
 
@@ -417,9 +430,26 @@ class CacheManager:
         if not self._should_cache(request_data):
             return
 
-        # Don't cache error responses
+        # Don't cache error responses – but only if it's a real top-level error and not
+        # a benign field some providers include in successful payloads.
+        # Heuristic: if an 'error' field exists, require that there is no normal content
+        # detected for this response format before skipping caching.
         if "error" in response_data:
-            return
+            # If it's clearly a successful responses/chat/embeddings payload, allow caching.
+            try:
+                is_empty = self._is_empty_response(response_data)
+            except Exception:
+                is_empty = False
+            if is_empty:
+                logger.info(
+                    "cache_skip_error_response",
+                    classification=(
+                        "responses_api"
+                        if ("outputs" in response_data or "output" in response_data)
+                        else "chat_or_other"
+                    ),
+                )
+                return
 
         # Skip caching empty model responses so callers can retry later
         try:

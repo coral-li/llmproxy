@@ -1,4 +1,5 @@
 import time
+from datetime import datetime
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -10,7 +11,7 @@ proxy_client = AsyncOpenAI(base_url="http://localhost:4243/")
 
 async def main():
     # Same prompt for both requests
-    prompt = "Write a one-sentence bedtime story about a unicorn. Come up with a very creative story."
+    prompt = f"Write a one-sentence bedtime story about a unicorn. Come up with a very creative story. The current time is {datetime.now()}"
 
     # First request
     print("Making first request...")
