@@ -264,6 +264,9 @@ class CacheManager:
             if isinstance(field_value, str) and field_value.strip():
                 return True
 
+        if "type" in output and output["type"] == "function_call":
+            return True
+
         return False
 
     def _is_empty_chat_completions(self, response_data: dict) -> bool:
@@ -380,38 +383,14 @@ class CacheManager:
         if not self._should_cache(request_data):
             return
 
-        # Don't cache error responses – but only if it's a real top-level error and not
-        # a benign field some providers include in successful payloads.
-        # Heuristic: if an 'error' field exists, require that there is no normal content
-        # detected for this response format before skipping caching.
-        if "error" in response_data:
-            # If it's clearly a successful responses/chat/embeddings payload, allow caching.
-            try:
-                is_empty = self._is_empty_response(response_data)
-            except Exception:
-                is_empty = False
-            if is_empty:
-                logger.info(
-                    "cache_skip_error_response",
-                    classification=(
-                        "responses_api"
-                        if ("outputs" in response_data or "output" in response_data)
-                        else "chat_or_other"
-                    ),
-                )
-                return
-
         # Skip caching empty model responses so callers can retry later
-        try:
-            if self._is_empty_response(response_data):
-                logger.info(
-                    "cache_skip_empty_response",
-                    request_summary={"model": request_data.get("model")},
-                )
-                return
-        except Exception as e:
-            # If detection fails for whatever reason, fall back to caching to avoid data loss.
-            logger.warning("empty_response_detection_failed", error=str(e))
+        if self._is_empty_response(response_data):
+            logger.info(
+                "cache_skip_empty_response",
+                request_summary={"model": request_data.get("model")},
+                response_data=response_data,
+            )
+            return
 
         key = self._generate_cache_key(request_data)
 
