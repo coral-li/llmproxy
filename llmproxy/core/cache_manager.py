@@ -68,7 +68,7 @@ class CacheManager:
     def _generate_cache_key(self, request_data: dict) -> str:
         """Generate cache key from request parameters"""
         # Create deterministic hash
-        cache_str = json.dumps(request_data, sort_keys=True, indent=2)
+        cache_str = json.dumps(request_data, sort_keys=True)
         cache_hash = hashlib.sha256(cache_str.encode()).hexdigest()
 
         key = f"{self.namespace}:{cache_hash}"
