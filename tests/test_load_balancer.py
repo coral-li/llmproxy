@@ -26,7 +26,6 @@ class TestLoadBalancer:
         assert lb.allowed_fails == 2
         assert lb.endpoint_configs == {}
         assert lb.state_manager is None
-        assert lb._lock is not None
 
     def test_load_balancer_default_initialization(self):
         """Test LoadBalancer initialization with defaults"""

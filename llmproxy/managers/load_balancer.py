@@ -26,7 +26,7 @@ class LoadBalancer:
         self.allowed_fails = allowed_fails
         self.endpoint_configs: Dict[str, List[Endpoint]] = {}  # Just config, no state
         self.state_manager = state_manager
-        self._lock = asyncio.Lock()
+        # No internal lock needed; endpoint configurations are initialized once and treated as read-only
 
     def set_state_manager(self, state_manager: EndpointStateManager) -> None:
         """Set the endpoint state manager after initialization"""
@@ -73,102 +73,126 @@ class LoadBalancer:
 
     async def select_endpoint(self, model_group: str) -> Optional[Endpoint]:
         """Select an endpoint using weighted round-robin with health checks from Redis"""
-        async with self._lock:
-            configs = self.endpoint_configs.get(model_group, [])
+        # Read-only access to endpoint configs
+        configs = list(self.endpoint_configs.get(model_group, []))
 
-            if not configs:
-                logger.error("no_endpoints_configured", model_group=model_group)
-                return None
+        if not configs:
+            logger.error("no_endpoints_configured", model_group=model_group)
+            return None
 
-            if self.state_manager:
-                await self._log_endpoint_states(configs, model_group)
-            primary_available, fallback_available = await self._get_available_endpoints(
-                configs
-            )
+        if self.state_manager:
+            await self._log_endpoint_states(configs, model_group)
 
-            # Use primary endpoints if available
-            if primary_available:
-                available_endpoints = primary_available
+        primary_available, fallback_available = await self._get_available_endpoints(
+            configs
+        )
+
+        # Use primary endpoints if available
+        if primary_available:
+            available_endpoints = primary_available
+        else:
+            # All primary endpoints are down, try weight=0 fallbacks
+            logger.warning("all_primary_endpoints_unavailable", model_group=model_group)
+            available_endpoints = fallback_available
+
+        if not available_endpoints:
+            logger.error("no_available_endpoints", model_group=model_group)
+            return None
+
+        # Weighted random selection
+        total_weight = sum(ep.weight for ep in available_endpoints)
+
+        # If all weights are 0 (all fallbacks), do uniform random
+        if total_weight == 0:
+            selected = random.choice(available_endpoints)
+        else:
+            rand = random.uniform(0, total_weight)
+            cumulative = 0
+
+            for endpoint in available_endpoints:
+                cumulative += endpoint.weight
+                if rand <= cumulative:
+                    selected = endpoint
+                    break
             else:
-                # All primary endpoints are down, try weight=0 fallbacks
-                logger.warning(
-                    "all_primary_endpoints_unavailable", model_group=model_group
-                )
-                available_endpoints = fallback_available
+                selected = available_endpoints[-1]
 
-            if not available_endpoints:
-                logger.error("no_available_endpoints", model_group=model_group)
-                return None
+        logger.info(
+            "endpoint_selected",
+            model_group=model_group,
+            endpoint_id=selected.id,
+            model=selected.model,
+            base_url=selected.base_url,
+            weight=selected.weight,
+        )
 
-            # Weighted random selection
-            total_weight = sum(ep.weight for ep in available_endpoints)
-
-            # If all weights are 0 (all fallbacks), do uniform random
-            if total_weight == 0:
-                selected = random.choice(available_endpoints)
-            else:
-                rand = random.uniform(0, total_weight)
-                cumulative = 0
-
-                for endpoint in available_endpoints:
-                    cumulative += endpoint.weight
-                    if rand <= cumulative:
-                        selected = endpoint
-                        break
-                else:
-                    selected = available_endpoints[-1]
-
-            logger.info(
-                "endpoint_selected",
-                model_group=model_group,
-                endpoint_id=selected.id,
-                model=selected.model,
-                base_url=selected.base_url,
-                weight=selected.weight,
-            )
-
-            return selected
+        return selected
 
     async def _get_available_endpoints(
         self, configs: List[Endpoint]
     ) -> Tuple[List[Endpoint], List[Endpoint]]:
-        primary_available = []
-        fallback_available = []
-        for endpoint_config in configs:
-            is_available = True
-            if self.state_manager:
-                is_available = await self.state_manager.is_endpoint_available(
-                    endpoint_config.id
+        primary_available: List[Endpoint] = []
+        fallback_available: List[Endpoint] = []
+
+        if not configs:
+            return primary_available, fallback_available
+
+        if self.state_manager:
+            availability_list = await asyncio.gather(
+                *(
+                    self.state_manager.is_endpoint_available(endpoint_config.id)
+                    for endpoint_config in configs
                 )
+            )
+        else:
+            availability_list = [True for _ in configs]
+
+        for endpoint_config, is_available in zip(configs, availability_list):
             if is_available:
                 if endpoint_config.weight > 0:
                     primary_available.append(endpoint_config)
                 else:
                     fallback_available.append(endpoint_config)
+
         return primary_available, fallback_available
 
     async def _log_endpoint_states(
         self, configs: List[Endpoint], model_group: str
     ) -> None:
-        endpoint_states = []
-        for config in configs:
-            if self.state_manager:
-                state = await self.state_manager.get_endpoint_state(config.id)
-                is_available = await self.state_manager.is_endpoint_available(config.id)
-                endpoint_states.append(
-                    {
-                        "id": config.id,
-                        "base_url": config.base_url,
-                        "weight": config.weight,
-                        "status": (
-                            state.get("status", "unknown") if state else "unknown"
-                        ),
-                        "is_available": is_available,
-                        "consecutive_failures": (
-                            state.get("consecutive_failures", 0) if state else 0
-                        ),
-                    }
+        if not self.state_manager:
+            logger.info(
+                "selecting_endpoint",
+                model_group=model_group,
+                endpoints=[],
+            )
+            return
+
+        # Fetch state and availability for all endpoints in parallel
+        per_endpoint_results = await asyncio.gather(
+            *(
+                asyncio.gather(
+                    self.state_manager.get_endpoint_state(config.id),
+                    self.state_manager.is_endpoint_available(config.id),
                 )
+                for config in configs
+            )
+        )
+
+        endpoint_states: List[Dict] = []
+        for config, (state, is_available) in zip(configs, per_endpoint_results):
+            endpoint_states.append(
+                {
+                    "id": config.id,
+                    "base_url": config.base_url,
+                    "weight": config.weight,
+                    "status": (state.get("status", "unknown") if state else "unknown"),
+                    "is_available": is_available,
+                    "consecutive_failures": (
+                        state.get("consecutive_failures", 0) if state else 0
+                    ),
+                }
+            )
+
         logger.info(
             "selecting_endpoint",
             model_group=model_group,
