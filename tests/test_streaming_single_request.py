@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from llmproxy.clients.llm_client import LLMClient
+from llmproxy.models.endpoint import Endpoint
 
 
 @pytest.mark.asyncio
@@ -46,10 +47,13 @@ async def test_chat_streaming_makes_single_post():
         mock_httpx_client.stream.side_effect = [first_cm, second_cm]
 
         # Invoke streaming request
-        result = await llm_client.create_chat_completion(
+        endpoint = Endpoint(
             model="gpt-4o-mini",
-            endpoint_url="https://api.openai.com",
-            api_key="test-key",
+            weight=1,
+            params={"api_key": "test-key", "base_url": "https://api.openai.com"},
+        )
+        result = await llm_client.create_chat_completion(
+            endpoint=endpoint,
             request_data={
                 "messages": [{"role": "user", "content": "Say hello"}],
                 "stream": True,
@@ -114,10 +118,13 @@ async def test_responses_api_streaming_makes_single_post():
         mock_httpx_client.stream.side_effect = [first_cm, second_cm]
 
         # Invoke streaming request for responses API
-        result = await llm_client.create_response(
+        endpoint = Endpoint(
             model="gpt-4o-mini",
-            endpoint_url="https://api.openai.com",
-            api_key="test-key",
+            weight=1,
+            params={"api_key": "test-key", "base_url": "https://api.openai.com"},
+        )
+        result = await llm_client.create_response(
+            endpoint=endpoint,
             request_data={
                 "input": [{"role": "user", "content": "Say hello"}],
                 "stream": True,

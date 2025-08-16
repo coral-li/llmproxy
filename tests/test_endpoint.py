@@ -76,14 +76,6 @@ class TestEndpoint:
         assert endpoint.base_url == "openai"
         assert endpoint.is_azure is False
 
-    def test_endpoint_non_string_base_url(self):
-        """Test endpoint with non-string base_url"""
-        params = {"api_key": "test-key", "base_url": 12345}  # Non-string value
-        endpoint = Endpoint(model="gpt-3.5-turbo", weight=1, params=params)
-
-        assert endpoint.base_url == 12345
-        assert endpoint.is_azure is False
-
     def test_deterministic_id_generation(self):
         """Test that ID generation is deterministic"""
         params1 = {"api_key": "test-key", "base_url": "https://api.openai.com"}

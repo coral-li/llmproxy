@@ -6,6 +6,7 @@ from urllib.parse import urljoin
 import httpx
 
 from llmproxy.core.logger import get_logger
+from llmproxy.models.endpoint import Endpoint
 
 logger = get_logger(__name__)
 
@@ -26,14 +27,15 @@ class LLMClient:
 
     async def create_chat_completion(
         self,
-        model: str,
-        endpoint_url: str,
-        api_key: str,
+        endpoint: Endpoint,
         request_data: dict,
-        default_query: Optional[dict] = None,
         stream: bool = False,
     ) -> Union[dict, AsyncIterator[str]]:
-        """Make chat completion request to OpenAI-compatible endpoint"""
+        """Make chat completion request using an Endpoint object."""
+
+        api_key = endpoint.params.get("api_key", "")
+        base_url = endpoint.params.get("base_url", "https://api.openai.com")
+        default_query = endpoint.params.get("default_query")
 
         # Prepare headers
         headers = {
@@ -45,17 +47,14 @@ class LLMClient:
         params = default_query or {}
 
         # Build full URL
-        if endpoint_url.endswith("/"):
-            endpoint_url = endpoint_url[:-1]
+        if isinstance(base_url, str) and base_url.endswith("/"):
+            base_url = base_url[:-1]
 
-        # Detect Azure OpenAI endpoints
-        is_azure = endpoint_url.endswith("azure.com")
-
-        if is_azure:
-            url = urljoin(endpoint_url + "/", "openai/v1/chat/completions")
+        if endpoint.is_azure:
+            url = urljoin(base_url + "/", "openai/v1/chat/completions")
         else:
             # Standard OpenAI URL
-            url = urljoin(endpoint_url + "/", "v1/chat/completions")
+            url = urljoin(base_url + "/", "v1/chat/completions")
 
         logger.debug(
             "llm_request",
@@ -71,13 +70,14 @@ class LLMClient:
 
     async def create_embedding(
         self,
-        model: str,
-        endpoint_url: str,
-        api_key: str,
+        endpoint: Endpoint,
         request_data: dict,
-        default_query: Optional[dict] = None,
     ) -> dict:
-        """Make embedding request to OpenAI-compatible endpoint"""
+        """Make embedding request using an Endpoint object."""
+
+        api_key = endpoint.params.get("api_key", "")
+        base_url = endpoint.params.get("base_url", "https://api.openai.com")
+        default_query = endpoint.params.get("default_query")
 
         # Prepare headers
         headers = {
@@ -89,20 +89,17 @@ class LLMClient:
         params = default_query or {}
 
         # Build full URL
-        if endpoint_url.endswith("/"):
-            endpoint_url = endpoint_url[:-1]
+        if isinstance(base_url, str) and base_url.endswith("/"):
+            base_url = base_url[:-1]
 
-        # Detect Azure OpenAI endpoints
-        is_azure = endpoint_url.endswith("azure.com")
-
-        if is_azure:
+        if endpoint.is_azure:
             url = urljoin(
-                endpoint_url + "/",
-                f"openai/deployments/{model}/embeddings",
+                base_url + "/",
+                f"openai/deployments/{endpoint.model}/embeddings",
             )
         else:
             # Standard OpenAI URL
-            url = urljoin(endpoint_url + "/", "v1/embeddings")
+            url = urljoin(base_url + "/", "v1/embeddings")
 
         logger.debug(
             "llm_embedding_request",
@@ -477,14 +474,15 @@ class LLMClient:
 
     async def create_response(
         self,
-        model: str,
-        endpoint_url: str,
-        api_key: str,
+        endpoint: Endpoint,
         request_data: dict,
-        default_query: Optional[dict] = None,
         stream: bool = False,
     ) -> Union[dict, AsyncIterator[str]]:
-        """Make response API request to OpenAI-compatible endpoint"""
+        """Make response API request using an Endpoint object."""
+
+        api_key = endpoint.params.get("api_key", "")
+        base_url = endpoint.params.get("base_url", "https://api.openai.com")
+        default_query = endpoint.params.get("default_query")
 
         # Prepare headers
         headers = {
@@ -496,18 +494,15 @@ class LLMClient:
         params = default_query or {}
 
         # Build full URL
-        if endpoint_url.endswith("/"):
-            endpoint_url = endpoint_url[:-1]
+        if isinstance(base_url, str) and base_url.endswith("/"):
+            base_url = base_url[:-1]
 
-        # Detect Azure OpenAI endpoints
-        is_azure = "azure.com" in endpoint_url
-
-        if is_azure:
+        if endpoint.is_azure:
             # Azure OpenAI may have different URL pattern for responses
-            url = urljoin(endpoint_url + "/", "openai/v1/responses")
+            url = urljoin(base_url + "/", "openai/v1/responses")
         else:
             # Standard OpenAI URL for responses
-            url = urljoin(endpoint_url + "/", "v1/responses")
+            url = urljoin(base_url + "/", "v1/responses")
 
         logger.debug(
             "llm_response_request",

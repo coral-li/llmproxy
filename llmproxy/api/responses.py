@@ -14,9 +14,7 @@ class ResponseHandler(BaseRequestHandler):
         """Make request to a specific endpoint"""
 
         # Extract endpoint parameters
-        api_key = endpoint.params.get("api_key", "")
         base_url = endpoint.params.get("base_url", "https://api.openai.com")
-        default_query = endpoint.params.get("default_query")
 
         # Create a copy of request data, filter proxy params, and update the model name
         filtered_data = self._filter_proxy_params(request_data)
@@ -45,13 +43,10 @@ class ResponseHandler(BaseRequestHandler):
                 endpoint_base_url=base_url,
             )
 
-        # Make the request
+        # Make the request using endpoint-aware client API
         response = await self.llm_client.create_response(
-            model=endpoint.model,
-            endpoint_url=base_url,
-            api_key=api_key,
+            endpoint=endpoint,
             request_data=filtered_data,
-            default_query=default_query,
             stream=is_streaming,
         )
 

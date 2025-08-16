@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from llmproxy.clients.llm_client import LLMClient
+from llmproxy.models.endpoint import Endpoint
 
 
 class TestLLMClientEdgeCases:
@@ -24,10 +25,13 @@ class TestLLMClientEdgeCases:
         with patch.object(client.client, "post", new_callable=AsyncMock) as mock_post:
             mock_post.side_effect = httpx.InvalidURL("Invalid URL")
 
-            result = await client.create_chat_completion(
+            endpoint = Endpoint(
                 model="gpt-3.5-turbo",
-                endpoint_url="not-a-valid-url",
-                api_key="test-key",
+                weight=1,
+                params={"api_key": "test-key", "base_url": "not-a-valid-url"},
+            )
+            result = await client.create_chat_completion(
+                endpoint=endpoint,
                 request_data={"messages": [{"role": "user", "content": "hi"}]},
             )
 
@@ -46,10 +50,13 @@ class TestLLMClientEdgeCases:
             mock_response.headers = {}
             mock_post.return_value = mock_response
 
-            result = await client.create_chat_completion(
+            endpoint = Endpoint(
                 model="gpt-3.5-turbo",
-                endpoint_url="https://api.openai.com",
-                api_key="test-key",
+                weight=1,
+                params={"api_key": "test-key", "base_url": "https://api.openai.com"},
+            )
+            result = await client.create_chat_completion(
+                endpoint=endpoint,
                 request_data=None,  # None request data
             )
 
@@ -64,10 +71,13 @@ class TestLLMClientEdgeCases:
         with patch.object(client.client, "post", new_callable=AsyncMock) as mock_post:
             mock_post.side_effect = httpx.ConnectError("Connection failed")
 
-            result = await client.create_chat_completion(
+            endpoint = Endpoint(
                 model="gpt-3.5-turbo",
-                endpoint_url="",  # Empty endpoint
-                api_key="test-key",
+                weight=1,
+                params={"api_key": "test-key", "base_url": ""},
+            )
+            result = await client.create_chat_completion(
+                endpoint=endpoint,
                 request_data={"messages": []},
             )
 
@@ -81,10 +91,13 @@ class TestLLMClientEdgeCases:
             ("https://myopenai.azure.com", True),
             ("https://myopenai.azure.com/", True),
             ("https://test.openai.azure.com", True),
-            ("https://azure.com", True),
+            ("https://azure.com", False),  # Bare domain is not considered Azure
             ("https://fakeazure.com", False),
             ("https://azure.com.fake", False),
-            ("azure.com", True),  # No protocol
+            (
+                "azure.com",
+                False,
+            ),  # Bare domain without protocol is not considered Azure
             ("", False),  # Empty string
         ]
 
@@ -95,20 +108,23 @@ class TestLLMClientEdgeCases:
             mock_response.headers = {}
             mock_post.return_value = mock_response
 
-            for endpoint, is_azure in test_cases:
-                await client.create_chat_completion(
+            for endpoint_url, is_azure in test_cases:
+                endpoint = Endpoint(
                     model="gpt-3.5-turbo",
-                    endpoint_url=endpoint,
-                    api_key="test-key",
+                    weight=1,
+                    params={"api_key": "test-key", "base_url": endpoint_url},
+                )
+                await client.create_chat_completion(
+                    endpoint=endpoint,
                     request_data={"messages": []},
                 )
 
                 if mock_post.called:
                     call_args = mock_post.call_args
                     url = call_args[0][0]
-                    if is_azure and endpoint:
+                    if is_azure and endpoint_url:
                         assert "/openai/v1/chat/completions" in url
-                    elif endpoint:
+                    elif endpoint_url:
                         assert "/v1/chat/completions" in url
 
     @pytest.mark.asyncio
@@ -122,10 +138,13 @@ class TestLLMClientEdgeCases:
             mock_response.headers = {}
             mock_post.return_value = mock_response
 
-            result = await client.create_chat_completion(
+            endpoint = Endpoint(
                 model="gpt-3.5-turbo",
-                endpoint_url="https://api.openai.com",
-                api_key="test-key",
+                weight=1,
+                params={"api_key": "test-key", "base_url": "https://api.openai.com"},
+            )
+            result = await client.create_chat_completion(
+                endpoint=endpoint,
                 request_data={"messages": []},
             )
 
@@ -141,10 +160,13 @@ class TestLLMClientEdgeCases:
         with patch.object(client.client, "post", new_callable=AsyncMock) as mock_post:
             mock_post.side_effect = httpx.TimeoutException("Request timeout")
 
-            result = await client.create_chat_completion(
+            endpoint = Endpoint(
                 model="gpt-3.5-turbo",
-                endpoint_url="https://api.openai.com",
-                api_key="test-key",
+                weight=1,
+                params={"api_key": "test-key", "base_url": "https://api.openai.com"},
+            )
+            result = await client.create_chat_completion(
+                endpoint=endpoint,
                 request_data={"messages": []},
             )
 
@@ -164,10 +186,13 @@ class TestLLMClientEdgeCases:
             mock_response.headers = {"x-request-id": "req_123"}
             mock_post.return_value = mock_response
 
-            result = await client.create_chat_completion(
+            endpoint = Endpoint(
                 model="gpt-3.5-turbo",
-                endpoint_url="https://api.openai.com",
-                api_key="test-key",
+                weight=1,
+                params={"api_key": "test-key", "base_url": "https://api.openai.com"},
+            )
+            result = await client.create_chat_completion(
+                endpoint=endpoint,
                 request_data={
                     "messages": [{"role": "user", "content": "test"}],
                     "temperature": 1.5,  # Invalid temperature
@@ -187,10 +212,13 @@ class TestLLMClientEdgeCases:
         )
 
         with patch.object(client.client, "stream", return_value=mock_context_manager):
-            result = await client.create_chat_completion(
+            endpoint = Endpoint(
                 model="gpt-3.5-turbo",
-                endpoint_url="https://api.openai.com",
-                api_key="test-key",
+                weight=1,
+                params={"api_key": "test-key", "base_url": "https://api.openai.com"},
+            )
+            result = await client.create_chat_completion(
+                endpoint=endpoint,
                 request_data={"messages": []},
                 stream=True,
             )
@@ -221,10 +249,13 @@ class TestLLMClientEdgeCases:
 
             mock_stream.aiter_lines = mock_aiter_lines
 
-            result = await client.create_chat_completion(
+            endpoint = Endpoint(
                 model="gpt-3.5-turbo",
-                endpoint_url="https://api.openai.com",
-                api_key="test-key",
+                weight=1,
+                params={"api_key": "test-key", "base_url": "https://api.openai.com"},
+            )
+            result = await client.create_chat_completion(
+                endpoint=endpoint,
                 request_data={"messages": []},
                 stream=True,
             )
@@ -265,10 +296,13 @@ class TestLLMClientEdgeCases:
                 }
             ]
 
-            result = await client.create_response(
+            endpoint = Endpoint(
                 model="gpt-4",
-                endpoint_url="https://api.openai.com",
-                api_key="test-key",
+                weight=1,
+                params={"api_key": "test-key", "base_url": "https://api.openai.com"},
+            )
+            result = await client.create_response(
+                endpoint=endpoint,
                 request_data={"input": complex_input},
             )
 
@@ -291,10 +325,13 @@ class TestLLMClientEdgeCases:
             mock_response.headers = {}
             mock_post.return_value = mock_response
 
-            result = await client.create_chat_completion(
+            endpoint = Endpoint(
                 model="gpt-3.5-turbo",
-                endpoint_url="https://api.openai.com",
-                api_key="test-key",
+                weight=1,
+                params={"api_key": "test-key", "base_url": "https://api.openai.com"},
+            )
+            result = await client.create_chat_completion(
+                endpoint=endpoint,
                 request_data={"messages": [{"role": "user", "content": large_content}]},
             )
 
@@ -317,10 +354,16 @@ class TestLLMClientEdgeCases:
                 mock_response.headers = {}
                 mock_post.return_value = mock_response
 
-                return await client.create_chat_completion(
+                endpoint = Endpoint(
                     model="gpt-3.5-turbo",
-                    endpoint_url="https://api.openai.com",
-                    api_key="test-key",
+                    weight=1,
+                    params={
+                        "api_key": "test-key",
+                        "base_url": "https://api.openai.com",
+                    },
+                )
+                return await client.create_chat_completion(
+                    endpoint=endpoint,
                     request_data={"messages": []},
                 )
 
@@ -351,10 +394,13 @@ class TestLLMClientEdgeCases:
             mock_response.headers = {}
             mock_post.return_value = mock_response
 
-            result = await client.create_chat_completion(
+            endpoint = Endpoint(
                 model="gpt-3.5-turbo",
-                endpoint_url="https://api.openai.com",
-                api_key="test-key",
+                weight=1,
+                params={"api_key": "test-key", "base_url": "https://api.openai.com"},
+            )
+            result = await client.create_chat_completion(
+                endpoint=endpoint,
                 request_data={"messages": long_messages},
             )
 
@@ -401,10 +447,13 @@ class TestLLMClientEdgeCases:
             mock_response.headers = {}
             mock_post.return_value = mock_response
 
-            result = await client.create_chat_completion(
+            endpoint = Endpoint(
                 model="gpt-3.5-turbo",
-                endpoint_url="https://api.openai.com",
-                api_key="test-key",
+                weight=1,
+                params={"api_key": "test-key", "base_url": "https://api.openai.com"},
+            )
+            result = await client.create_chat_completion(
+                endpoint=endpoint,
                 request_data={
                     "messages": [{"role": "user", "content": unicode_content}]
                 },
