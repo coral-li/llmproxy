@@ -195,8 +195,13 @@ class CacheManager:
         For embeddings API format, checks if the response has valid embeddings data.
         """
 
-        # Check for responses API format first (has 'outputs' instead of 'choices')
-        if "outputs" in response_data:
+        # Check for responses API format first
+        # Accept both 'outputs' (preferred) and 'output' (alternate), or direct 'output_text'
+        if (
+            "outputs" in response_data
+            or "output" in response_data
+            or (isinstance(response_data.get("output_text"), str))
+        ):
             return self._is_empty_responses_api(response_data)
 
         # Check for embeddings API format (has 'data' with embedding objects)
@@ -241,8 +246,22 @@ class CacheManager:
         return True
 
     def _is_empty_responses_api(self, response_data: dict) -> bool:
-        """Check if responses API format response is empty."""
-        outputs = response_data.get("outputs", [])
+        """Check if responses API format response is empty.
+
+        Supports both "outputs" (preferred) and "output" (singular) response shapes
+        observed across providers/mocks, and also a direct "output_text" shorthand
+        when present.
+        """
+        # First, support the convenience top-level output_text field
+        output_text = response_data.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return False
+
+        # Normalize outputs list from either key
+        outputs = response_data.get("outputs")
+        if outputs is None:
+            outputs = response_data.get("output", [])
+
         if not isinstance(outputs, list) or len(outputs) == 0:
             return True
 
@@ -697,7 +716,7 @@ class StreamingCacheWriter:
         self.chunks_written = 0
         self._error_occurred = False
         self.is_responses_api = is_responses_api
-        self.normalized_chunks: Optional[List[dict]] = [] if is_responses_api else None
+        self.normalized_chunks: Optional[List[dict]] = None
         self.current_event = None
         self.buffered_lines: List[str] = []
         # Indicates if we have observed any non-empty content so that we only cache
@@ -728,7 +747,6 @@ class StreamingCacheWriter:
                     "parse_responses_event_json_error", data_content=data_content
                 )
                 continue
-
         return event_type, event_data
 
     def _create_response_chunk(
@@ -863,12 +881,18 @@ class StreamingCacheWriter:
                 buffer_lines=len(self.buffered_lines),
             )
             normalized_chunk = self._parse_responses_event(full_event)
-            if normalized_chunk and self.normalized_chunks is not None:
+            if normalized_chunk:
+                if self.normalized_chunks is None:
+                    self.normalized_chunks = []
                 self.normalized_chunks.append(normalized_chunk.to_dict())
                 self.chunks_written += 1
                 # Mark as having content if this chunk contains any text delta
-                if normalized_chunk.content and normalized_chunk.content.strip():
-                    self._has_content = True
+                if normalized_chunk.content is not None:
+                    if (
+                        isinstance(normalized_chunk.content, str)
+                        and normalized_chunk.content.strip()
+                    ):
+                        self._has_content = True
                 logger.debug(
                     "responses_api_chunk_normalized",
                     event_type=normalized_chunk.event_type,
@@ -925,15 +949,14 @@ class StreamingCacheWriter:
             logger.error("chat_streaming_cache_error", error=str(e))
 
     async def _finalize_responses_cache(self) -> None:
-        """Finalize the responses API cache with normalized chunks"""
+        """Finalize the responses API cache with normalized chunks."""
         key = f"{self.cache_manager._generate_cache_key(self.request_data)}:responses_stream"
 
         try:
-            if not self._has_content:
+            if not self._has_content and not self._infer_content_from_completed_event():
                 logger.info("responses_streaming_cache_skipped_empty", key=key)
                 return
 
-            # Store normalized chunks as JSON
             normalized_key = f"{key}:normalized"
             await self.cache_manager.redis.setex(
                 normalized_key,
@@ -953,6 +976,33 @@ class StreamingCacheWriter:
             logger.error(
                 "responses_streaming_cache_finalize_error", error=str(e), key=key
             )
+            return None
+            pass
+
+    def _infer_content_from_completed_event(self) -> bool:
+        """Infer presence of meaningful content from a response.completed event."""
+        if not isinstance(self.normalized_chunks, list):
+            return False
+
+        chunks_list: List[dict] = [
+            ch for ch in self.normalized_chunks if isinstance(ch, dict)
+        ]
+        for chunk in chunks_list:
+            if chunk.get("event_type") != "response.completed":
+                continue
+            metadata = chunk.get("metadata", {})
+            outputs = metadata.get("outputs", [])
+            outputs_list: List[dict] = [o for o in outputs if isinstance(o, dict)]
+            for output in outputs_list:
+                content_items = output.get("content", [])
+                items_list: List[dict] = [
+                    p for p in content_items if isinstance(p, dict)
+                ]
+                for piece in items_list:
+                    text_val = piece.get("text")
+                    if isinstance(text_val, str) and text_val.strip():
+                        return True
+        return False
 
     async def intercept_stream(self, stream: AsyncIterator[str]) -> AsyncIterator[str]:
         """Intercept a stream, cache chunks, and yield them"""
