@@ -3,6 +3,10 @@ import json
 from enum import Enum
 from typing import Any, Dict
 
+from llmproxy.core.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 class EndpointStatus(Enum):
     """Endpoint health status"""
@@ -37,9 +41,7 @@ class Endpoint:
         id_data = {
             "model": model,
             "base_url": params.get("base_url", "openai"),
-            "deployment": params.get("deployment"),  # Azure deployment name
-            "api_version": params.get("api_version"),  # Azure API version
-            "api_key": params.get("api_key"),
+            "default_query": params.get("default_query"),
         }
 
         # Remove None values
@@ -47,6 +49,13 @@ class Endpoint:
 
         # Create deterministic hash
         id_str = json.dumps(id_data, sort_keys=True)
+        logger.info(
+            "_generate_deterministic_id",
+            params=params,
+            id_data=id_data,
+            id_str=id_str,
+        )
+
         return hashlib.sha256(id_str.encode()).hexdigest()[:16]
 
     def get_config_dict(self) -> Dict[str, Any]:

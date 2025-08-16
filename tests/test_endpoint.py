@@ -105,8 +105,8 @@ class TestEndpoint:
         }
         endpoint3 = Endpoint(model="gpt-3.5-turbo", weight=1, params=params3)
 
-        # IDs should be different because API key is included in ID generation
-        assert endpoint1.id != endpoint3.id
+        # API key is excluded from ID generation; IDs should be the same
+        assert endpoint1.id == endpoint3.id
 
     def test_deterministic_id_different_models(self):
         """Test that different models generate different IDs"""
@@ -157,8 +157,8 @@ class TestEndpoint:
         }
         endpoint3 = Endpoint(model="gpt-3.5-turbo", weight=1, params=params3)
 
-        # Should have different ID due to different API key
-        assert endpoint1.id != endpoint3.id
+        # API key is excluded from ID generation; IDs should be the same
+        assert endpoint1.id == endpoint3.id
 
     def test_deterministic_id_different_deployments(self):
         """Test that different Azure deployments generate different IDs"""
@@ -178,7 +178,8 @@ class TestEndpoint:
         endpoint1 = Endpoint(model="gpt-3.5-turbo", weight=1, params=params1)
         endpoint2 = Endpoint(model="gpt-3.5-turbo", weight=1, params=params2)
 
-        assert endpoint1.id != endpoint2.id
+        # Deployment is excluded from ID generation; IDs should be the same
+        assert endpoint1.id == endpoint2.id
 
     def test_deterministic_id_excludes_none_values(self):
         """Test that None values are excluded from ID generation"""
@@ -250,13 +251,10 @@ class TestEndpoint:
         }
         endpoint = Endpoint(model="gpt-3.5-turbo", weight=1, params=params)
 
-        # Manually calculate expected ID (now includes API key)
+        # Manually calculate expected ID per new algorithm (model, base_url, default_query if present)
         id_data = {
             "model": "gpt-3.5-turbo",
             "base_url": "https://api.openai.com",
-            "deployment": "test-deployment",
-            "api_version": "2024-02-15",
-            "api_key": "test-key",
         }
         id_str = json.dumps(id_data, sort_keys=True)
         expected_id = hashlib.sha256(id_str.encode()).hexdigest()[:16]
