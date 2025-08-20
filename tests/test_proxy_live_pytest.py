@@ -190,6 +190,95 @@ class TestProxyLive:
             duration2 < duration1 * 0.8
         ), f"Second request not significantly faster: {duration1:.2f}s vs {duration2:.2f}s"
 
+    def test_responses_api_non_streaming_cache(self, proxy_url, model):
+        """Test caching behavior for responses API (non-streaming).
+
+        The second identical request should be significantly faster if served from cache.
+        """
+        self.log("Testing responses API non-streaming caching behavior...")
+
+        instructions = "You are a helpful assistant. Be concise."
+        input_text = "What is 2+2? Reply with just the number."
+
+        # First request (expect cache miss)
+        self.log("  Making first responses API request (expecting cache miss)...")
+        import httpx
+
+        start1 = time.time()
+        with httpx.Client(timeout=30.0) as client:
+            r1 = client.post(
+                f"{proxy_url}/responses",
+                json={
+                    "model": model,
+                    "instructions": instructions,
+                    "input": input_text,
+                    # Ask the mock server to add artificial latency so that
+                    # the cache benefit is reliably measurable.
+                    "extra_body": {"test_delay_ms": 500},
+                },
+                headers={"Authorization": "Bearer dummy-key"},
+            )
+        duration1 = time.time() - start1
+        assert r1.status_code == 200, f"First responses API call failed: {r1.text}"
+        data1 = r1.json()
+        # Extract output text from either 'outputs' (preferred) or 'output' (mock server)
+        outputs1 = data1.get("outputs") or data1.get("output") or []
+        output_text1 = None
+        for item in outputs1:
+            content_list = item.get("content", []) if isinstance(item, dict) else []
+            for piece in content_list:
+                if isinstance(piece, dict) and piece.get("text"):
+                    output_text1 = piece["text"]
+                    break
+            if output_text1:
+                break
+
+        self.log(
+            f"  First responses API request: {output_text1} (took {duration1:.2f}s)"
+        )
+
+        # Second request (should hit cache)
+        self.log("  Making second responses API request (expecting cache hit)...")
+        start2 = time.time()
+        with httpx.Client(timeout=30.0) as client:
+            r2 = client.post(
+                f"{proxy_url}/responses",
+                json={
+                    "model": model,
+                    "instructions": instructions,
+                    "input": input_text,
+                    "extra_body": {"test_delay_ms": 500},
+                },
+                headers={"Authorization": "Bearer dummy-key"},
+            )
+        duration2 = time.time() - start2
+        assert r2.status_code == 200, f"Second responses API call failed: {r2.text}"
+        data2 = r2.json()
+        outputs2 = data2.get("outputs") or data2.get("output") or []
+        output_text2 = None
+        for item in outputs2:
+            content_list = item.get("content", []) if isinstance(item, dict) else []
+            for piece in content_list:
+                if isinstance(piece, dict) and piece.get("text"):
+                    output_text2 = piece["text"]
+                    break
+            if output_text2:
+                break
+
+        self.log(
+            f"  Second responses API request: {output_text2} (took {duration2:.2f}s)"
+        )
+
+        # Assertions: same content and noticeable speedup on second call
+        assert output_text1, "First responses API request has no output"
+        assert output_text2, "Second responses API request has no output"
+        assert (
+            output_text1 == output_text2
+        ), f"Outputs differ: '{output_text1}' vs '{output_text2}'"
+        assert (
+            duration2 < duration1 * 0.8
+        ), f"Second responses API request not significantly faster: {duration1:.2f}s vs {duration2:.2f}s"
+
     def test_error_handling(self, openai_client):
         """Test error handling with invalid request"""
         self.log("Testing error handling...")

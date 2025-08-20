@@ -76,7 +76,7 @@ async def test_empty_responses_api_stream_not_cached():
 
     await writer.write_and_yield("event: response.completed\n")
     await writer.write_and_yield(
-        'data: {"type": "response.completed", "response": {"model": "gpt-4"}}\n'
+        'data: {"type": "response.completed", "response": {"model": "gpt-4", "outputs": []}}\n'
     )
     await writer.write_and_yield("\n")  # flush & finalize
 
@@ -108,7 +108,7 @@ async def test_non_empty_responses_api_stream_cached():
 
     await writer.write_and_yield("event: response.completed\n")
     await writer.write_and_yield(
-        'data: {"type": "response.completed", "response": {"model": "gpt-4"}}\n'
+        'data: {"type": "response.completed", "response": {"model": "gpt-4", "outputs": [{"type": "message", "content": [{"type": "text", "text": "Hello, how can I help you?"}]}]}}\n'
     )
     await writer.write_and_yield("\n")  # flush & finalize
 

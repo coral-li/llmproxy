@@ -79,39 +79,48 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     config = await load_config_async(config_path)
     logger.info("configuration_loaded", config_path=config_path)
 
-    # Initialize Redis and endpoint state manager
+    # Initialize all resources; ensure partial cleanup on failure before yield
     try:
+        # Initialize Redis and endpoint state manager
         redis_manager, endpoint_state_manager = await init_redis(config)
         logger.info("redis_initialized")
+
+        # Initialize cache manager
+        cache_ttl = 604800  # 7 days default
+        if config.general_settings.cache_params:
+            cache_ttl = config.general_settings.cache_params.ttl
+
+        cache_manager = CacheManager(
+            redis_client=redis_manager.get_client(),
+            ttl=cache_ttl,
+            namespace="llmproxy",
+            cache_enabled=config.general_settings.cache,
+        )
+        logger.info("cache_manager_initialized")
+
+        # Initialize LLM client
+        llm_client = LLMClient()
+        logger.info("llm_client_initialized")
+
+        # Initialize load balancer with endpoint state manager
+        load_balancer = LoadBalancer(
+            cooldown_time=config.general_settings.cooldown_time,
+            allowed_fails=config.general_settings.allowed_fails,
+            state_manager=endpoint_state_manager,
+        )
+        await load_balancer.initialize_from_config(config)
+        logger.info("load_balancer_initialized")
     except Exception as e:
-        logger.error("redis_initialization_failed", error=str(e))
+        logger.error("startup_initialization_failed", error=str(e))
+        # Best-effort cleanup of partially initialized resources
+        try:
+            if llm_client:
+                await llm_client.close()
+                logger.info("llm_client_closed_after_failure")
+        finally:
+            if redis_manager:
+                await redis_manager.disconnect()
         raise
-
-    # Initialize cache manager
-    cache_ttl = 604800  # 7 days default
-    if config.general_settings.cache_params:
-        cache_ttl = config.general_settings.cache_params.ttl
-
-    cache_manager = CacheManager(
-        redis_client=redis_manager.get_client(),
-        ttl=cache_ttl,
-        namespace="llmproxy",
-        cache_enabled=config.general_settings.cache,
-    )
-    logger.info("cache_manager_initialized")
-
-    # Initialize LLM client
-    llm_client = LLMClient()
-    logger.info("llm_client_initialized")
-
-    # Initialize load balancer with endpoint state manager
-    load_balancer = LoadBalancer(
-        cooldown_time=config.general_settings.cooldown_time,
-        allowed_fails=config.general_settings.allowed_fails,
-        state_manager=endpoint_state_manager,
-    )
-    await load_balancer.initialize_from_config(config)
-    logger.info("load_balancer_initialized")
 
     # Signal handlers are handled by uvicorn, no need for custom handlers
 
@@ -119,9 +128,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Cleanup
     logger.info("application_shutdown")
+    if llm_client:
+        # Ensure HTTP connection pools are closed
+        await llm_client.close()
+        logger.info("llm_client_closed")
     if redis_manager:
         # Use RedisManager's disconnect method for proper cleanup
         await redis_manager.disconnect()
+    if load_balancer:
+        # Finalize load balancer (no external resources, but keep logs consistent)
+        await load_balancer.shutdown()
 
 
 app = FastAPI(
@@ -221,15 +237,20 @@ async def clear_cache() -> Dict[str, Any]:
         )
 
     try:
-        redis_client = redis_manager.get_client()
-        # Get all keys in the cache namespace
-        keys = await redis_client.keys("llmproxy:*")
+        if cache_manager is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Cache manager not available",
+            )
 
-        deleted_count = 0
-        if keys:
-            deleted_count = await redis_client.delete(*keys)
+        # Delegate to CacheManager's safe implementation (SCAN + batched UNLINK/DEL)
+        deleted_count = await cache_manager.invalidate_all()
 
-        logger.info("cache_cleared", deleted_entries=deleted_count)
+        logger.info(
+            "cache_cleared",
+            deleted_entries=deleted_count,
+            method="cache_manager.invalidate_all",
+        )
 
         return {
             "timestamp": datetime.utcnow().isoformat(),

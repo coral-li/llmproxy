@@ -1,14 +1,12 @@
 import json
 import time
-from typing import AsyncIterator, Optional, Union
+from typing import AsyncContextManager, AsyncIterator, Optional, Union
 from urllib.parse import urljoin
 
 import httpx
 
 from llmproxy.core.logger import get_logger
-
-# Imports are handled properly through package structure
-
+from llmproxy.models.endpoint import Endpoint
 
 logger = get_logger(__name__)
 
@@ -29,14 +27,15 @@ class LLMClient:
 
     async def create_chat_completion(
         self,
-        model: str,
-        endpoint_url: str,
-        api_key: str,
+        endpoint: Endpoint,
         request_data: dict,
-        default_query: Optional[dict] = None,
         stream: bool = False,
     ) -> Union[dict, AsyncIterator[str]]:
-        """Make chat completion request to OpenAI-compatible endpoint"""
+        """Make chat completion request using an Endpoint object."""
+
+        api_key = endpoint.params.get("api_key", "")
+        base_url = endpoint.params.get("base_url", "https://api.openai.com")
+        default_query = endpoint.params.get("default_query")
 
         # Prepare headers
         headers = {
@@ -48,17 +47,14 @@ class LLMClient:
         params = default_query or {}
 
         # Build full URL
-        if endpoint_url.endswith("/"):
-            endpoint_url = endpoint_url[:-1]
+        if isinstance(base_url, str) and base_url.endswith("/"):
+            base_url = base_url[:-1]
 
-        # Detect Azure OpenAI endpoints
-        is_azure = endpoint_url.endswith("azure.com")
-
-        if is_azure:
-            url = urljoin(endpoint_url + "/", "openai/v1/chat/completions")
+        if endpoint.is_azure:
+            url = urljoin(base_url + "/", "openai/v1/chat/completions")
         else:
             # Standard OpenAI URL
-            url = urljoin(endpoint_url + "/", "v1/chat/completions")
+            url = urljoin(base_url + "/", "v1/chat/completions")
 
         logger.debug(
             "llm_request",
@@ -74,13 +70,14 @@ class LLMClient:
 
     async def create_embedding(
         self,
-        model: str,
-        endpoint_url: str,
-        api_key: str,
+        endpoint: Endpoint,
         request_data: dict,
-        default_query: Optional[dict] = None,
     ) -> dict:
-        """Make embedding request to OpenAI-compatible endpoint"""
+        """Make embedding request using an Endpoint object."""
+
+        api_key = endpoint.params.get("api_key", "")
+        base_url = endpoint.params.get("base_url", "https://api.openai.com")
+        default_query = endpoint.params.get("default_query")
 
         # Prepare headers
         headers = {
@@ -92,20 +89,17 @@ class LLMClient:
         params = default_query or {}
 
         # Build full URL
-        if endpoint_url.endswith("/"):
-            endpoint_url = endpoint_url[:-1]
+        if isinstance(base_url, str) and base_url.endswith("/"):
+            base_url = base_url[:-1]
 
-        # Detect Azure OpenAI endpoints
-        is_azure = endpoint_url.endswith("azure.com")
-
-        if is_azure:
+        if endpoint.is_azure:
             url = urljoin(
-                endpoint_url + "/",
-                f"openai/deployments/{model}/embeddings",
+                base_url + "/",
+                f"openai/deployments/{endpoint.model}/embeddings",
             )
         else:
             # Standard OpenAI URL
-            url = urljoin(endpoint_url + "/", "v1/embeddings")
+            url = urljoin(base_url + "/", "v1/embeddings")
 
         logger.debug(
             "llm_embedding_request",
@@ -130,10 +124,8 @@ class LLMClient:
                 url=url,
                 headers=sanitized_headers,
                 params=params,
-                request_body_sample=(
-                    str(data)[:500] if data else None
-                ),  # First 500 chars of request
                 model=data.get("model") if data else None,
+                request_size=len(json.dumps(data)) if data else 0,
             )
 
             response = await self.client.post(
@@ -158,7 +150,6 @@ class LLMClient:
                         url=url,
                         status_code=response.status_code,
                         json_error=str(json_error),
-                        response_text=error[:500],  # First 500 chars
                         duration_ms=request_duration_ms,
                     )
                     return {
@@ -185,7 +176,6 @@ class LLMClient:
                     logger.error(
                         "llm_request_server_error",
                         **error_details,
-                        request_body=data,  # Include full request for 500 errors
                     )
                 # For vague 400 errors, log request details to help debugging
                 elif (
@@ -266,7 +256,7 @@ class LLMClient:
             "method": "POST",
             "duration_ms": request_duration_ms,
             "response_headers": dict(response.headers),
-            "error_body": error,
+            "error_size": len(error) if error else 0,
             "request_model": data.get("model") if data else None,
             "request_size": len(json.dumps(data)) if data else 0,
         }
@@ -281,40 +271,10 @@ class LLMClient:
         }
         if data:
             if "messages" in data:
-                messages_summary = []
-                for msg in data.get("messages", [])[:5]:
-                    msg_summary = {
-                        "role": msg.get("role"),
-                        "content_preview": (
-                            str(msg.get("content", ""))[:200] + "..."
-                            if len(str(msg.get("content", ""))) > 200
-                            else str(msg.get("content", ""))
-                        ),
-                    }
-                    messages_summary.append(msg_summary)
-                debug_details["messages_preview"] = messages_summary
                 debug_details["total_messages"] = len(data.get("messages", []))
             if "input" in data:
                 input_data = data.get("input", [])
                 if isinstance(input_data, list):
-                    input_summary = []
-                    for inp in input_data[:3]:
-                        if isinstance(inp, dict):
-                            inp_summary = {
-                                "role": inp.get("role"),
-                                "content_types": (
-                                    [c.get("type") for c in inp.get("content", [])]
-                                    if isinstance(inp.get("content"), list)
-                                    else None
-                                ),
-                                "content_preview": (
-                                    str(inp)[:200] + "..."
-                                    if len(str(inp)) > 200
-                                    else str(inp)
-                                ),
-                            }
-                            input_summary.append(inp_summary)
-                    debug_details["input_preview"] = input_summary
                     debug_details["total_inputs"] = len(input_data)
             debug_details["parameters"] = {
                 "temperature": data.get("temperature"),
@@ -349,75 +309,32 @@ class LLMClient:
         )
 
         try:
-            response = self.client.stream(
+            # Open the stream ONCE and decide based on status code
+            response_cm = self.client.stream(
                 "POST", url, headers=headers, params=params, json=data
             )
 
-            # Check if it's an error by peeking at the response
-            # We'll handle the actual streaming in a wrapper
-            async with response as resp:
-                if resp.status_code != 200:
-                    error_text = await resp.aread()
-                    error_details, duration_ms = self._handle_stream_error(
-                        resp, error_text, data, request_start_time, url
-                    )
-                    if resp.status_code >= 500:
-                        logger.error(
-                            "llm_stream_server_error",
-                            **error_details,
-                            request_body=data,  # Include full request for 500 errors
-                        )
-                    elif resp.status_code == 400 and (
-                        "check your inputs" in error_text.decode().lower()
-                        or "invalid_request_error" in error_text.decode()
-                    ):
-                        debug_details = {
-                            **error_details,
-                            "request_id": resp.headers.get("x-request-id"),
-                        }
-                        if data and "messages" in data:
-                            messages_summary = []
-                            for msg in data.get("messages", [])[:5]:
-                                msg_summary = {
-                                    "role": msg.get("role"),
-                                    "content_preview": (
-                                        str(msg.get("content", ""))[:200] + "..."
-                                        if len(str(msg.get("content", ""))) > 200
-                                        else str(msg.get("content", ""))
-                                    ),
-                                }
-                                messages_summary.append(msg_summary)
-                            debug_details["messages_preview"] = messages_summary
-                            debug_details["total_messages"] = len(
-                                data.get("messages", [])
-                            )
-                        logger.error(
-                            "llm_stream_vague_error",
-                            **debug_details,
-                        )
-                    else:
-                        logger.error(
-                            "llm_stream_error",
-                            **error_details,
-                        )
+            # Manually manage the async context so we can reuse the same response
+            resp = await response_cm.__aenter__()
 
-                    # Return error dict instead of yielding error chunks
-                    return {
-                        "status_code": resp.status_code,
-                        "headers": dict(resp.headers),
-                        "data": None,
-                        "error": error_text.decode(),
-                        "duration_ms": duration_ms,
-                    }
+            if resp.status_code != 200:
+                return await self._process_stream_error_response(
+                    resp=resp,
+                    data=data,
+                    request_start_time=request_start_time,
+                    url=url,
+                    response_cm=response_cm,
+                )
 
-            # Success - return a generator that manages its own context
+            # Success - return a generator that iterates the SAME response
             async def stream_response() -> AsyncIterator[str]:
-                async with self.client.stream(
-                    "POST", url, headers=headers, params=params, json=data
-                ) as response:
-                    async for line in response.aiter_lines():
+                try:
+                    async for line in resp.aiter_lines():
                         for chunk in self._filter_and_yield_chunk(line):
                             yield chunk
+                finally:
+                    # Close the original response when the consumer is done
+                    await response_cm.__aexit__(None, None, None)
 
             return stream_response()
 
@@ -473,11 +390,58 @@ class LLMClient:
             "method": "POST",
             "duration_ms": duration_ms,
             "response_headers": dict(response.headers),
-            "error_body": error_text.decode(),
+            "error_size": len(error_text) if error_text else 0,
             "request_model": data.get("model") if data else None,
             "streaming": True,
         }
         return error_details, duration_ms
+
+    async def _process_stream_error_response(
+        self,
+        resp: httpx.Response,
+        data: Optional[dict],
+        request_start_time: float,
+        url: str,
+        response_cm: AsyncContextManager[httpx.Response],
+    ) -> dict:
+        """Handle non-200 streaming responses consistently and close the stream.
+
+        This centralizes logging and response formatting, and ensures the opened
+        stream context is properly closed before returning.
+        """
+        error_text = await resp.aread()
+        try:
+            error_details, duration_ms = self._handle_stream_error(
+                resp, error_text, data, request_start_time, url
+            )
+            if resp.status_code >= 500:
+                logger.error(
+                    "llm_stream_server_error",
+                    **error_details,
+                )
+            elif resp.status_code == 400 and (
+                "check your inputs" in error_text.decode().lower()
+                or "invalid_request_error" in error_text.decode()
+            ):
+                debug_details = {
+                    **error_details,
+                    "request_id": resp.headers.get("x-request-id"),
+                }
+                if data and "messages" in data:
+                    debug_details["total_messages"] = len(data.get("messages", []))
+                logger.error("llm_stream_vague_error", **debug_details)
+            else:
+                logger.error("llm_stream_error", **error_details)
+        finally:
+            await response_cm.__aexit__(None, None, None)
+
+        return {
+            "status_code": resp.status_code,
+            "headers": dict(resp.headers),
+            "data": None,
+            "error": error_text.decode(),
+            "duration_ms": duration_ms,
+        }
 
     def _filter_and_yield_chunk(self, line: str) -> list:
         if line and line.startswith("data: "):
@@ -502,7 +466,7 @@ class LLMClient:
                             return []
                 return [line + "\n\n"]
             except json.JSONDecodeError:
-                logger.debug(f"Could not parse chunk, forwarding as-is: {line}")
+                logger.debug("Could not parse chunk, forwarding as-is")
                 return [line + "\n\n"]
         elif line:
             return [line + "\n\n"]
@@ -510,14 +474,15 @@ class LLMClient:
 
     async def create_response(
         self,
-        model: str,
-        endpoint_url: str,
-        api_key: str,
+        endpoint: Endpoint,
         request_data: dict,
-        default_query: Optional[dict] = None,
         stream: bool = False,
     ) -> Union[dict, AsyncIterator[str]]:
-        """Make response API request to OpenAI-compatible endpoint"""
+        """Make response API request using an Endpoint object."""
+
+        api_key = endpoint.params.get("api_key", "")
+        base_url = endpoint.params.get("base_url", "https://api.openai.com")
+        default_query = endpoint.params.get("default_query")
 
         # Prepare headers
         headers = {
@@ -529,18 +494,15 @@ class LLMClient:
         params = default_query or {}
 
         # Build full URL
-        if endpoint_url.endswith("/"):
-            endpoint_url = endpoint_url[:-1]
+        if isinstance(base_url, str) and base_url.endswith("/"):
+            base_url = base_url[:-1]
 
-        # Detect Azure OpenAI endpoints
-        is_azure = "azure.com" in endpoint_url
-
-        if is_azure:
+        if endpoint.is_azure:
             # Azure OpenAI may have different URL pattern for responses
-            url = urljoin(endpoint_url + "/", "openai/v1/responses")
+            url = urljoin(base_url + "/", "openai/v1/responses")
         else:
             # Standard OpenAI URL for responses
-            url = urljoin(endpoint_url + "/", "v1/responses")
+            url = urljoin(base_url + "/", "v1/responses")
 
         logger.debug(
             "llm_response_request",
@@ -565,50 +527,50 @@ class LLMClient:
         request_start_time = time.time()
 
         try:
-            response = self.client.stream(
+            # Open the stream ONCE and decide based on status code
+            response_cm = self.client.stream(
                 "POST", url, headers=headers, params=params, json=data
             )
 
-            # Check if it's an error by peeking at the response
-            async with response as resp:
-                if resp.status_code != 200:
-                    error_text = await resp.aread()
-                    duration_ms = int((time.time() - request_start_time) * 1000)
+            resp = await response_cm.__aenter__()
+
+            if resp.status_code != 200:
+                error_text = await resp.aread()
+                duration_ms = int((time.time() - request_start_time) * 1000)
+                try:
                     logger.error(
                         "llm_response_stream_error",
                         status_code=resp.status_code,
-                        error=error_text.decode()[:500],
+                        error_size=len(error_text) if error_text else 0,
                         duration_ms=duration_ms,
                     )
+                finally:
+                    await response_cm.__aexit__(None, None, None)
 
-                    # Return error dict instead of yielding error chunks
-                    return {
-                        "status_code": resp.status_code,
-                        "headers": dict(resp.headers),
-                        "data": None,
-                        "error": error_text.decode(),
-                        "duration_ms": duration_ms,
-                    }
+                return {
+                    "status_code": resp.status_code,
+                    "headers": dict(resp.headers),
+                    "data": None,
+                    "error": error_text.decode(),
+                    "duration_ms": duration_ms,
+                }
 
-            # Success - return a generator that manages its own context
+            # Success - return a generator that iterates the SAME response
             async def stream_response() -> AsyncIterator[str]:
-                async with self.client.stream(
-                    "POST", url, headers=headers, params=params, json=data
-                ) as response:
+                try:
                     # Stream the response line by line for proper event parsing
-                    # The responses API uses event-based SSE format that needs line-by-line processing
-                    async for line in response.aiter_lines():
+                    async for line in resp.aiter_lines():
                         # Yield each line with proper newline formatting
                         if line:
-                            # Non-empty lines get a single newline
                             yield line + "\n"
                         else:
-                            # Empty lines indicate event boundary, add another newline
                             yield "\n"
 
                         # Log event lines for debugging
                         if line.startswith("event: "):
                             logger.debug("response_api_event_line", event_line=line)
+                finally:
+                    await response_cm.__aexit__(None, None, None)
 
             return stream_response()
 

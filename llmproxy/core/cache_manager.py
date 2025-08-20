@@ -67,48 +67,11 @@ class CacheManager:
 
     def _generate_cache_key(self, request_data: dict) -> str:
         """Generate cache key from request parameters"""
-        # Extract relevant fields for caching
-        cache_data = {
-            "model": request_data.get("model"),
-            # Handle both chat completions (messages) and responses API (input)
-            "messages": request_data.get("messages"),
-            "input": request_data.get("input"),
-            # Responses API specific fields
-            "instructions": request_data.get("instructions"),
-            "previous_response_id": request_data.get("previous_response_id"),
-            "temperature": request_data.get("temperature"),
-            "max_tokens": request_data.get("max_tokens"),
-            "max_output_tokens": request_data.get("max_output_tokens"),
-            "max_completion_tokens": request_data.get("max_completion_tokens"),
-            "top_p": request_data.get("top_p"),
-            "frequency_penalty": request_data.get("frequency_penalty"),
-            "presence_penalty": request_data.get("presence_penalty"),
-            "tools": request_data.get("tools"),
-            "tool_choice": request_data.get("tool_choice"),
-            "seed": request_data.get("seed"),
-        }
-
-        # Remove None values
-        cache_data = {k: v for k, v in cache_data.items() if v is not None}
-
         # Create deterministic hash
-        cache_str = json.dumps(cache_data, sort_keys=True)
+        cache_str = json.dumps(request_data, sort_keys=True)
         cache_hash = hashlib.sha256(cache_str.encode()).hexdigest()
 
         key = f"{self.namespace}:{cache_hash}"
-
-        # Enhanced debug logging
-        logger.debug(
-            "cache_key_generated",
-            key=key,
-            request_summary={
-                "model": request_data.get("model"),
-                "has_messages": bool(request_data.get("messages")),
-                "has_input": bool(request_data.get("input")),
-                "has_instructions": bool(request_data.get("instructions")),
-                "temperature": request_data.get("temperature"),
-            },
-        )
 
         return key
 
@@ -195,8 +158,13 @@ class CacheManager:
         For embeddings API format, checks if the response has valid embeddings data.
         """
 
-        # Check for responses API format first (has 'outputs' instead of 'choices')
-        if "outputs" in response_data:
+        # Check for responses API format first
+        # Accept both 'outputs' (preferred) and 'output' (alternate), or direct 'output_text'
+        if (
+            "outputs" in response_data
+            or "output" in response_data
+            or (isinstance(response_data.get("output_text"), str))
+        ):
             return self._is_empty_responses_api(response_data)
 
         # Check for embeddings API format (has 'data' with embedding objects)
@@ -241,8 +209,22 @@ class CacheManager:
         return True
 
     def _is_empty_responses_api(self, response_data: dict) -> bool:
-        """Check if responses API format response is empty."""
-        outputs = response_data.get("outputs", [])
+        """Check if responses API format response is empty.
+
+        Supports both "outputs" (preferred) and "output" (singular) response shapes
+        observed across providers/mocks, and also a direct "output_text" shorthand
+        when present.
+        """
+        # First, support the convenience top-level output_text field
+        output_text = response_data.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return False
+
+        # Normalize outputs list from either key
+        outputs = response_data.get("outputs")
+        if outputs is None:
+            outputs = response_data.get("output", [])
+
         if not isinstance(outputs, list) or len(outputs) == 0:
             return True
 
@@ -281,6 +263,9 @@ class CacheManager:
             field_value = output.get(field)
             if isinstance(field_value, str) and field_value.strip():
                 return True
+
+        if "type" in output and output["type"] == "function_call":
+            return True
 
         return False
 
@@ -398,21 +383,14 @@ class CacheManager:
         if not self._should_cache(request_data):
             return
 
-        # Don't cache error responses
-        if "error" in response_data:
-            return
-
         # Skip caching empty model responses so callers can retry later
-        try:
-            if self._is_empty_response(response_data):
-                logger.info(
-                    "cache_skip_empty_response",
-                    request_summary={"model": request_data.get("model")},
-                )
-                return
-        except Exception as e:
-            # If detection fails for whatever reason, fall back to caching to avoid data loss.
-            logger.warning("empty_response_detection_failed", error=str(e))
+        if self._is_empty_response(response_data):
+            logger.info(
+                "cache_skip_empty_response",
+                request_summary={"model": request_data.get("model")},
+                response_data=response_data,
+            )
+            return
 
         key = self._generate_cache_key(request_data)
 
@@ -596,22 +574,44 @@ class CacheManager:
         }
 
     async def invalidate_all(self) -> int:
-        """Invalidate all cached entries for this namespace"""
+        """Invalidate all cached entries for this namespace using SCAN + batched UNLINK/DEL"""
         try:
             pattern = f"{self.namespace}:*"
-            keys = await self.redis.keys(pattern)
+            batch_size = 500
 
-            if keys:
-                deleted = await self.redis.delete(*keys)
-                logger.info(
-                    "cache_invalidate_all",
-                    namespace=self.namespace,
-                    keys_deleted=deleted,
-                )
-                return int(deleted)
-            else:
-                logger.info("cache_invalidate_all_empty", namespace=self.namespace)
-                return 0
+            total_deleted = 0
+            batch: List[str] = []
+
+            async for key in self.redis.scan_iter(match=pattern, count=batch_size):
+                batch.append(key)
+                if len(batch) >= batch_size:
+                    try:
+                        if hasattr(self.redis, "unlink"):
+                            deleted = await self.redis.unlink(*batch)
+                        else:
+                            deleted = await self.redis.delete(*batch)
+                        total_deleted += int(deleted)
+                    finally:
+                        batch = []
+
+            # Flush any remaining keys
+            if batch:
+                try:
+                    if hasattr(self.redis, "unlink"):
+                        deleted = await self.redis.unlink(*batch)
+                    else:
+                        deleted = await self.redis.delete(*batch)
+                    total_deleted += int(deleted)
+                finally:
+                    batch = []
+
+            logger.info(
+                "cache_invalidate_all",
+                namespace=self.namespace,
+                keys_deleted=total_deleted,
+                method="scan_iter",
+            )
+            return total_deleted
 
         except Exception as e:
             logger.error(
@@ -619,68 +619,7 @@ class CacheManager:
             )
             return 0
 
-    async def invalidate_by_pattern(self, pattern: str) -> int:
-        """Invalidate cached entries matching a pattern"""
-        try:
-            # Ensure pattern includes namespace
-            if not pattern.startswith(f"{self.namespace}:"):
-                pattern = f"{self.namespace}:{pattern}"
-
-            keys = await self.redis.keys(pattern)
-
-            if keys:
-                deleted = await self.redis.delete(*keys)
-                logger.info(
-                    "cache_invalidate_pattern", pattern=pattern, keys_deleted=deleted
-                )
-                return int(deleted)
-            else:
-                logger.info("cache_invalidate_pattern_empty", pattern=pattern)
-                return 0
-
-        except Exception as e:
-            logger.error(
-                "cache_invalidate_pattern_error", error=str(e), pattern=pattern
-            )
-            return 0
-
-    async def invalidate_request(self, request_data: dict) -> bool:
-        """Invalidate cache for a specific request"""
-        key = None
-        try:
-            key = self._generate_cache_key(request_data)
-
-            # Delete both regular and streaming cache entries
-            # Covers chat completions (:stream) and responses API
-            regular_key = key
-            streaming_key = f"{key}:stream"
-            responses_stream_key = f"{key}:responses_stream"
-            responses_normalized_key = f"{responses_stream_key}:normalized"
-
-            # Use a single atomic delete call for all keys (fewer round-trips)
-            deleted = await self.redis.delete(
-                regular_key,
-                streaming_key,
-                responses_stream_key,
-                responses_normalized_key,
-            )
-
-            if deleted > 0:
-                logger.info(
-                    "cache_invalidate_request", key=key, entries_deleted=deleted
-                )
-                return True
-            else:
-                logger.debug("cache_invalidate_request_not_found", key=key)
-                return False
-
-        except Exception as e:
-            logger.error(
-                "cache_invalidate_request_error",
-                error=str(e),
-                key=key if key is not None else "unknown",
-            )
-            return False
+    # Removed invalidate_request as it was unused in production code and led to duplicated logic
 
 
 class StreamingCacheWriter:
@@ -697,7 +636,7 @@ class StreamingCacheWriter:
         self.chunks_written = 0
         self._error_occurred = False
         self.is_responses_api = is_responses_api
-        self.normalized_chunks: Optional[List[dict]] = [] if is_responses_api else None
+        self.normalized_chunks: Optional[List[dict]] = None
         self.current_event = None
         self.buffered_lines: List[str] = []
         # Indicates if we have observed any non-empty content so that we only cache
@@ -728,7 +667,6 @@ class StreamingCacheWriter:
                     "parse_responses_event_json_error", data_content=data_content
                 )
                 continue
-
         return event_type, event_data
 
     def _create_response_chunk(
@@ -863,12 +801,18 @@ class StreamingCacheWriter:
                 buffer_lines=len(self.buffered_lines),
             )
             normalized_chunk = self._parse_responses_event(full_event)
-            if normalized_chunk and self.normalized_chunks is not None:
+            if normalized_chunk:
+                if self.normalized_chunks is None:
+                    self.normalized_chunks = []
                 self.normalized_chunks.append(normalized_chunk.to_dict())
                 self.chunks_written += 1
                 # Mark as having content if this chunk contains any text delta
-                if normalized_chunk.content and normalized_chunk.content.strip():
-                    self._has_content = True
+                if normalized_chunk.content is not None:
+                    if (
+                        isinstance(normalized_chunk.content, str)
+                        and normalized_chunk.content.strip()
+                    ):
+                        self._has_content = True
                 logger.debug(
                     "responses_api_chunk_normalized",
                     event_type=normalized_chunk.event_type,
@@ -925,15 +869,14 @@ class StreamingCacheWriter:
             logger.error("chat_streaming_cache_error", error=str(e))
 
     async def _finalize_responses_cache(self) -> None:
-        """Finalize the responses API cache with normalized chunks"""
+        """Finalize the responses API cache with normalized chunks."""
         key = f"{self.cache_manager._generate_cache_key(self.request_data)}:responses_stream"
 
         try:
-            if not self._has_content:
+            if not self._has_content and not self._infer_content_from_completed_event():
                 logger.info("responses_streaming_cache_skipped_empty", key=key)
                 return
 
-            # Store normalized chunks as JSON
             normalized_key = f"{key}:normalized"
             await self.cache_manager.redis.setex(
                 normalized_key,
@@ -953,6 +896,33 @@ class StreamingCacheWriter:
             logger.error(
                 "responses_streaming_cache_finalize_error", error=str(e), key=key
             )
+            return None
+            pass
+
+    def _infer_content_from_completed_event(self) -> bool:
+        """Infer presence of meaningful content from a response.completed event."""
+        if not isinstance(self.normalized_chunks, list):
+            return False
+
+        chunks_list: List[dict] = [
+            ch for ch in self.normalized_chunks if isinstance(ch, dict)
+        ]
+        for chunk in chunks_list:
+            if chunk.get("event_type") != "response.completed":
+                continue
+            metadata = chunk.get("metadata", {})
+            outputs = metadata.get("outputs", [])
+            outputs_list: List[dict] = [o for o in outputs if isinstance(o, dict)]
+            for output in outputs_list:
+                content_items = output.get("content", [])
+                items_list: List[dict] = [
+                    p for p in content_items if isinstance(p, dict)
+                ]
+                for piece in items_list:
+                    text_val = piece.get("text")
+                    if isinstance(text_val, str) and text_val.strip():
+                        return True
+        return False
 
     async def intercept_stream(self, stream: AsyncIterator[str]) -> AsyncIterator[str]:
         """Intercept a stream, cache chunks, and yield them"""

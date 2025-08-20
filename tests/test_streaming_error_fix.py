@@ -143,10 +143,13 @@ async def test_streaming_timeout_returns_504():
     llm_client.client = mock_client
 
     # Test chat completion streaming timeout
-    response = await llm_client.create_chat_completion(
+    endpoint = Endpoint(
         model="gpt-3.5-turbo",
-        endpoint_url="https://api.openai.com",
-        api_key="test-key",
+        weight=1,
+        params={"api_key": "test-key", "base_url": "https://api.openai.com"},
+    )
+    response = await llm_client.create_chat_completion(
+        endpoint=endpoint,
         request_data={"messages": [{"role": "user", "content": "Hello"}]},
         stream=True,
     )
@@ -187,10 +190,13 @@ async def test_streaming_success_returns_generator():
     llm_client.client = mock_client
 
     # Make streaming request
-    response = await llm_client.create_chat_completion(
+    endpoint = Endpoint(
         model="gpt-3.5-turbo",
-        endpoint_url="https://api.openai.com",
-        api_key="test-key",
+        weight=1,
+        params={"api_key": "test-key", "base_url": "https://api.openai.com"},
+    )
+    response = await llm_client.create_chat_completion(
+        endpoint=endpoint,
         request_data={"messages": [{"role": "user", "content": "Hello"}]},
         stream=True,
     )

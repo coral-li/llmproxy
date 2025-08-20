@@ -57,15 +57,30 @@ class MockOpenAIServer:
         user_message, is_responses_api = self._extract_user_message(body, request)
         response_content = self._select_response_content(user_message)
 
+        # Optional per-request artificial delay for cache testing
+        delay_ms = 0
+        if isinstance(body, dict):
+            extra_body = body.get("extra_body", {})
+            if isinstance(extra_body, dict):
+                test_delay = extra_body.get("test_delay_ms", 0)
+                try:
+                    delay_ms = int(test_delay)
+                except Exception:
+                    delay_ms = 0
+        delay_seconds = (delay_ms / 1000.0) if delay_ms and delay_ms > 0 else 0.1
+
         # Simulate network latency for non-streaming requests as well to
-        # ensure caching provides a measurable speed improvement.
+        # ensure caching provides a measurable speed improvement. Allow tests
+        # to override via extra_body.test_delay_ms to make cache tests reliable.
         if not is_streaming:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(delay_seconds)
 
         if is_responses_api:
             if is_streaming:
                 return StreamingResponse(
-                    self._stream_responses_api(response_content, model),
+                    self._stream_responses_api(
+                        response_content, model, initial_delay=delay_seconds
+                    ),
                     media_type="text/plain",
                 )
             else:
@@ -94,7 +109,9 @@ class MockOpenAIServer:
         else:
             if is_streaming:
                 return StreamingResponse(
-                    self._stream_response(response_content, model),
+                    self._stream_response(
+                        response_content, model, initial_delay=delay_seconds
+                    ),
                     media_type="text/plain",
                 )
             else:
@@ -157,11 +174,13 @@ class MockOpenAIServer:
         else:
             return f"Mock response to: {user_message}"
 
-    async def _stream_response(self, content: str, model: str):
+    async def _stream_response(
+        self, content: str, model: str, initial_delay: float = 0.1
+    ):
         """Generate streaming response"""
         # Add artificial delay for cache testing (simulate network latency for first request)
         # This ensures measurable timing differences between cached and non-cached requests
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(initial_delay)
 
         # First chunk
         chunk = {
@@ -208,11 +227,13 @@ class MockOpenAIServer:
         yield f"data: {json.dumps(chunk)}\n\n"
         yield "data: [DONE]\n\n"
 
-    async def _stream_responses_api(self, content: str, model: str):
+    async def _stream_responses_api(
+        self, content: str, model: str, initial_delay: float = 0.1
+    ):
         """Generate streaming response for responses API"""
         # Add artificial delay for cache testing (simulate network latency for first request)
         # This ensures measurable timing differences between cached and non-cached requests
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(initial_delay)
 
         # Initial event
         event = {

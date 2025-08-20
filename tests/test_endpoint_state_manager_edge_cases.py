@@ -41,28 +41,6 @@ class TestEndpointStateManagerEdgeCases:
         )
 
     @pytest.mark.asyncio
-    async def test_initialize_endpoint_with_none_values(
-        self, state_manager, mock_redis
-    ):
-        """Test endpoint initialization with None/missing values"""
-        # Mock Redis to return None (no existing state)
-        mock_redis.get.return_value = None
-
-        # Create endpoint with minimal data
-        endpoint = Endpoint(
-            model=None, weight=1, params={"base_url": None, "api_key": None}
-        )
-
-        await state_manager.initialize_endpoint(endpoint, "test-group")
-
-        # Should handle None values gracefully
-        mock_redis.setex.assert_called_once()
-        call_args = mock_redis.setex.call_args
-        state_data = json.loads(call_args[0][2])
-        assert state_data["model"] is None
-        assert state_data["base_url"] is None
-
-    @pytest.mark.asyncio
     async def test_initialize_endpoint_with_redis_failure(
         self, state_manager, mock_redis, sample_endpoint
     ):

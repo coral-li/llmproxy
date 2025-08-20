@@ -1,4 +1,3 @@
-import asyncio
 import json
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -17,7 +16,6 @@ class EndpointStateManager:
     def __init__(self, redis_client: redis.Redis, state_ttl: int = 3600):
         self.redis = redis_client
         self.state_ttl = state_ttl  # How long to keep endpoint state in Redis
-        self._lock = asyncio.Lock()
 
     def _get_endpoint_key(self, endpoint_id: str) -> str:
         """Get Redis key for endpoint state"""

@@ -3,6 +3,11 @@ import json
 from enum import Enum
 from typing import Any, Dict
 
+from llmproxy.core.azure_utils import is_azure_host
+from llmproxy.core.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 class EndpointStatus(Enum):
     """Endpoint health status"""
@@ -25,11 +30,10 @@ class Endpoint:
 
         # Extract key info for logging (config only, no state)
         self.base_url = params.get("base_url", "openai")
-        self.is_azure = (
-            "azure" in self.base_url.lower()
-            if isinstance(self.base_url, str)
-            else False
-        )
+        assert isinstance(
+            self.base_url, str
+        ), f"base_url must be a string but is a {type(self.base_url)}"
+        self.is_azure = is_azure_host(self.base_url)
 
     def _generate_deterministic_id(self, model: str, params: dict) -> str:
         """Generate a deterministic ID based on model and key parameters"""
@@ -37,9 +41,7 @@ class Endpoint:
         id_data = {
             "model": model,
             "base_url": params.get("base_url", "openai"),
-            "deployment": params.get("deployment"),  # Azure deployment name
-            "api_version": params.get("api_version"),  # Azure API version
-            "api_key": params.get("api_key"),
+            "default_query": params.get("default_query"),
         }
 
         # Remove None values
@@ -47,6 +49,7 @@ class Endpoint:
 
         # Create deterministic hash
         id_str = json.dumps(id_data, sort_keys=True)
+
         return hashlib.sha256(id_str.encode()).hexdigest()[:16]
 
     def get_config_dict(self) -> Dict[str, Any]:

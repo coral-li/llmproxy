@@ -63,7 +63,6 @@ def create_router(
 
     @router.post("/embeddings")
     async def embeddings(request: Request) -> Any:
-        print("embeddings endpoint called")
         return await _handle_endpoint(
             request, get_embedding_handler, _process_embedding_request
         )
