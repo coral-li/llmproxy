@@ -194,6 +194,9 @@ class BaseRequestHandler(ABC):
                 )
                 if not candidate:
                     return self._no_endpoint_response(model_group)
+                # Guard against mocked/selectors that ignore exclude_ids
+                if candidate.id in attempted_endpoints:
+                    continue
                 endpoint = candidate
                 break
 
