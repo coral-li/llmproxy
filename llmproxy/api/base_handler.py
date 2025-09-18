@@ -189,12 +189,13 @@ class BaseRequestHandler(ABC):
             # Try to find an endpoint that hasn't been attempted yet
             endpoint = None
             for _ in range(max_selection_attempts):
-                candidate = await self.load_balancer.select_endpoint(model_group)
+                candidate = await self.load_balancer.select_endpoint(
+                    model_group, exclude_ids=attempted_endpoints
+                )
                 if not candidate:
                     return self._no_endpoint_response(model_group)
-                if candidate.id not in attempted_endpoints:
-                    endpoint = candidate
-                    break
+                endpoint = candidate
+                break
 
             if not endpoint:
                 # All available endpoints have been attempted
