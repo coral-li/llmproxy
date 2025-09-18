@@ -1,6 +1,6 @@
 import asyncio
 import random
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from llmproxy.config_model import LLMProxyConfig
 from llmproxy.core.logger import get_logger
@@ -71,10 +71,18 @@ class LoadBalancer:
             total_endpoints=sum(len(pool) for pool in self.endpoint_configs.values()),
         )
 
-    async def select_endpoint(self, model_group: str) -> Optional[Endpoint]:
-        """Select an endpoint using weighted round-robin with health checks from Redis"""
+    async def select_endpoint(
+        self, model_group: str, exclude_ids: Optional[Set[str]] = None
+    ) -> Optional[Endpoint]:
+        """Select an endpoint using weighted random with health checks from Redis.
+
+        exclude_ids: endpoint IDs that must not be returned (e.g., already tried).
+        """
         # Read-only access to endpoint configs
         configs = list(self.endpoint_configs.get(model_group, []))
+        exclude_ids = exclude_ids or set()
+        if exclude_ids:
+            configs = [cfg for cfg in configs if cfg.id not in exclude_ids]
 
         if not configs:
             logger.error("no_endpoints_configured", model_group=model_group)

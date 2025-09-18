@@ -11,7 +11,7 @@ import pytest  # noqa: E402
 import requests  # noqa: E402
 import uvicorn  # noqa: E402
 from fastapi import FastAPI, Request  # noqa: E402
-from fastapi.responses import StreamingResponse  # noqa: E402
+from fastapi.responses import JSONResponse, StreamingResponse  # noqa: E402
 from openai import AsyncOpenAI, OpenAI  # noqa: E402
 
 from llmproxy.main import app  # noqa: E402
@@ -36,6 +36,8 @@ class MockOpenAIServer:
         self._setup_routes()
         self.server_thread: Optional[threading.Thread] = None
         self.server: Optional[uvicorn.Server] = None
+        # Error injection controls
+        self.error_status_code: Optional[int] = None
 
     def _setup_routes(self):
         @self.app.post("/chat/completions")
@@ -75,11 +77,27 @@ class MockOpenAIServer:
         if not is_streaming:
             await asyncio.sleep(delay_seconds)
 
+        # If this mock server is configured to return an error, do so now
+        if isinstance(self.error_status_code, int) and self.error_status_code > 0:
+            error_payload = {
+                "error": {
+                    "message": "Intentional mock error",
+                    "type": "mock_error",
+                    "code": self.error_status_code,
+                }
+            }
+            return JSONResponse(
+                content=error_payload, status_code=self.error_status_code
+            )
+
+        # Tag responses with originating mock port for observability in tests
+        tagged_response_content = f"{response_content} [from {self.port}]"
+
         if is_responses_api:
             if is_streaming:
                 return StreamingResponse(
                     self._stream_responses_api(
-                        response_content, model, initial_delay=delay_seconds
+                        tagged_response_content, model, initial_delay=delay_seconds
                     ),
                     media_type="text/plain",
                 )
@@ -96,21 +114,21 @@ class MockOpenAIServer:
                             "role": "assistant",
                             "status": "completed",
                             "content": [
-                                {"type": "output_text", "text": response_content}
+                                {"type": "output_text", "text": tagged_response_content}
                             ],
                         }
                     ],
                     "usage": {
                         "prompt_tokens": 10,
-                        "completion_tokens": len(response_content.split()),
-                        "total_tokens": 10 + len(response_content.split()),
+                        "completion_tokens": len(tagged_response_content.split()),
+                        "total_tokens": 10 + len(tagged_response_content.split()),
                     },
                 }
         else:
             if is_streaming:
                 return StreamingResponse(
                     self._stream_response(
-                        response_content, model, initial_delay=delay_seconds
+                        tagged_response_content, model, initial_delay=delay_seconds
                     ),
                     media_type="text/plain",
                 )
@@ -125,15 +143,15 @@ class MockOpenAIServer:
                             "index": 0,
                             "message": {
                                 "role": "assistant",
-                                "content": response_content,
+                                "content": tagged_response_content,
                             },
                             "finish_reason": "stop",
                         }
                     ],
                     "usage": {
                         "prompt_tokens": 10,
-                        "completion_tokens": len(response_content.split()),
-                        "total_tokens": 10 + len(response_content.split()),
+                        "completion_tokens": len(tagged_response_content.split()),
+                        "total_tokens": 10 + len(tagged_response_content.split()),
                     },
                 }
 
@@ -294,6 +312,17 @@ class MockOpenAIServer:
         """Stop the mock server"""
         if self.server:
             self.server.should_exit = True
+
+    # ----------------------
+    # Error injection helpers
+    # ----------------------
+    def set_error_response(self, status_code: int) -> None:
+        """Configure this mock server to always return the given HTTP error code."""
+        self.error_status_code = status_code
+
+    def clear_error_response(self) -> None:
+        """Clear any configured error response behavior."""
+        self.error_status_code = None
 
     def _wait_for_server(self, timeout: int = 10):
         """Wait for server to be ready"""
