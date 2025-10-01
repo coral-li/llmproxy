@@ -24,6 +24,7 @@ model_groups:
 general_settings:
   bind_address: 127.0.0.1
   bind_port: 5000
+  http_timeout: 300
   num_retries: 3
   allowed_fails: 1
   cooldown_time: 60

@@ -46,6 +46,7 @@ class GeneralSettings(BaseModel):
 
     bind_address: str = "127.0.0.1"
     bind_port: int
+    http_timeout: float = Field(default=300.0, gt=0)
     num_retries: int = 3
     allowed_fails: int = 1
     cooldown_time: int = 60
