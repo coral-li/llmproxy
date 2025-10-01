@@ -99,7 +99,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("cache_manager_initialized")
 
         # Initialize LLM client
-        llm_client = LLMClient(timeout=config.general_settings.http_timeout)
+        llm_client = LLMClient(
+            timeout=config.general_settings.http_timeout,
+            max_connections=config.general_settings.http_max_connections,
+        )
         logger.info("llm_client_initialized")
 
         # Initialize load balancer with endpoint state manager

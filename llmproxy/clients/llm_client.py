@@ -14,11 +14,14 @@ logger = get_logger(__name__)
 class LLMClient:
     """Unified client for OpenAI and Azure OpenAI endpoints"""
 
-    def __init__(self, timeout: float = 300.0):
+    def __init__(self, timeout: float = 300.0, max_connections: int = 100):
         self.timeout = timeout
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
-            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+            limits=httpx.Limits(
+                max_keepalive_connections=20,
+                max_connections=max_connections,
+            ),
         )
 
     async def close(self) -> None:
