@@ -1,0 +1,7 @@
+---
+alwaysApply: true
+---
+
+# Activating the python virtual environment
+- After opening a new shell, you must activate the python virtual environment using `source .venv/bin/activate`.
+- Do not activate the virtual environment with every command. This is wasteful. It only needs to be activated once per shell. If you're running multiple commands sequentially in a shell that's already open, do not activate it again.

@@ -1,0 +1,7 @@
+---
+description: Documentation and API Reference Lookup via context7
+globs:
+alwaysApply: true
+---
+
+When working with python packages, external APIs etc, always use the context7 tool to look up the latest documentation and up-to-date API.
