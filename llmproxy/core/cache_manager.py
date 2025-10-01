@@ -643,6 +643,29 @@ class StreamingCacheWriter:
         # meaningful responses.
         self._has_content: bool = False
 
+    def _stream_key(self) -> str:
+        suffix = ":responses_stream" if self.is_responses_api else ":stream"
+        return f"{self.cache_manager._generate_cache_key(self.request_data)}{suffix}"
+
+    async def _handle_stream_cleanup(self) -> None:
+        """Remove any partially written cache artifacts when a stream fails."""
+        cleanup_keys = [self._stream_key()]
+        if self.is_responses_api:
+            cleanup_keys.append(f"{cleanup_keys[0]}:normalized")
+
+        try:
+            await self.cache_manager.redis.delete(*cleanup_keys)
+            logger.debug(
+                "streaming_cache_cleanup",
+                keys=cleanup_keys,
+            )
+        except Exception as cleanup_error:  # pragma: no cover - best effort cleanup
+            logger.debug(
+                "streaming_cache_cleanup_failed",
+                keys=cleanup_keys,
+                error=str(cleanup_error),
+            )
+
     def _parse_sse_lines(self, chunk: str) -> Tuple[Optional[str], Optional[dict]]:
         """Parse SSE lines to extract event type and data"""
         lines = chunk.strip().split("\n")
@@ -753,6 +776,7 @@ class StreamingCacheWriter:
 
         # Check for error in chunk - be more specific to avoid false positives
         if self._detect_error_in_chunk(chunk):
+            await self._handle_stream_cleanup()
             return chunk
 
         if self.is_responses_api:
@@ -824,7 +848,7 @@ class StreamingCacheWriter:
                 await self._finalize_responses_cache()
 
     async def _handle_chat_completions(self, chunk: str) -> None:
-        key = f"{self.cache_manager._generate_cache_key(self.request_data)}:stream"
+        key = self._stream_key()
         try:
             # Detect if chunk carries non-empty content; this is a best-effort
             # heuristic based on the OpenAI chat completions streaming format.
@@ -852,6 +876,8 @@ class StreamingCacheWriter:
                         pass
 
             await self.cache_manager.redis.rpush(key, chunk)  # type: ignore
+            # Ensure the list does not linger forever if the stream aborts before [DONE].
+            await self.cache_manager.redis.expire(key, self.cache_manager.ttl)
             self.chunks_written += 1
             if chunk.strip() == "data: [DONE]":
                 if self._has_content:
@@ -866,11 +892,13 @@ class StreamingCacheWriter:
                     await self.cache_manager.redis.delete(key)
                     logger.info("chat_streaming_cache_skipped_empty", key=key)
         except Exception as e:
+            # Redis failures should not crash the stream; they'll be logged upstream.
             logger.error("chat_streaming_cache_error", error=str(e))
+            await self._handle_stream_cleanup()
 
     async def _finalize_responses_cache(self) -> None:
         """Finalize the responses API cache with normalized chunks."""
-        key = f"{self.cache_manager._generate_cache_key(self.request_data)}:responses_stream"
+        key = self._stream_key()
 
         try:
             if not self._has_content and not self._infer_content_from_completed_event():
@@ -931,5 +959,6 @@ class StreamingCacheWriter:
                 yield await self.write_and_yield(chunk)
         except Exception as e:
             self._error_occurred = True
+            await self._handle_stream_cleanup()
             logger.error("streaming_cache_writer_error", error=str(e))
             raise
