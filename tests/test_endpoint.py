@@ -97,8 +97,8 @@ class TestEndpoint:
         }
         endpoint3 = Endpoint(model="gpt-3.5-turbo", weight=1, params=params3)
 
-        # API key is excluded from ID generation; IDs should be the same
-        assert endpoint1.id == endpoint3.id
+        # Different API keys now yield different hashed IDs to avoid collisions
+        assert endpoint1.id != endpoint3.id
 
     def test_deterministic_id_different_models(self):
         """Test that different models generate different IDs"""
@@ -149,8 +149,8 @@ class TestEndpoint:
         }
         endpoint3 = Endpoint(model="gpt-3.5-turbo", weight=1, params=params3)
 
-        # API key is excluded from ID generation; IDs should be the same
-        assert endpoint1.id == endpoint3.id
+        # Different API keys now yield different hashed IDs to avoid collisions
+        assert endpoint1.id != endpoint3.id
 
     def test_deterministic_id_different_deployments(self):
         """Test that different Azure deployments generate different IDs"""
@@ -170,7 +170,7 @@ class TestEndpoint:
         endpoint1 = Endpoint(model="gpt-3.5-turbo", weight=1, params=params1)
         endpoint2 = Endpoint(model="gpt-3.5-turbo", weight=1, params=params2)
 
-        # Deployment is excluded from ID generation; IDs should be the same
+        # Deployment is still excluded from ID generation; IDs remain the same
         assert endpoint1.id == endpoint2.id
 
     def test_deterministic_id_excludes_none_values(self):
@@ -247,6 +247,7 @@ class TestEndpoint:
         id_data = {
             "model": "gpt-3.5-turbo",
             "base_url": "https://api.openai.com",
+            "api_key": "test-key",
         }
         id_str = json.dumps(id_data, sort_keys=True)
         expected_id = hashlib.sha256(id_str.encode()).hexdigest()[:16]

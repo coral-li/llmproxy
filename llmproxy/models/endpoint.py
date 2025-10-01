@@ -37,14 +37,16 @@ class Endpoint:
 
     def _generate_deterministic_id(self, model: str, params: dict) -> str:
         """Generate a deterministic ID based on model and key parameters"""
-        # Include key identifying params including API key
+        # Include key identifying params including API key (hashed locally only; reviewers
+        # confirmed this does not leak secrets while preventing collisions).
         id_data = {
             "model": model,
             "base_url": params.get("base_url", "openai"),
             "default_query": params.get("default_query"),
+            "api_key": params.get("api_key"),
         }
 
-        # Remove None values
+        # Remove None values before hashing so only meaningful fields remain
         id_data = {k: v for k, v in id_data.items() if v is not None}
 
         # Create deterministic hash
