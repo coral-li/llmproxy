@@ -141,6 +141,7 @@ class TestLoadConfig:
             assert isinstance(config, LLMProxyConfig)
             assert config.general_settings.bind_address == "127.0.0.1"
             assert config.general_settings.bind_port == 8000
+            assert config.general_settings.http_timeout == 300.0
         finally:
             os.unlink(config_path)
 
@@ -163,6 +164,7 @@ class TestLoadConfig:
                 config = await load_config_async()
                 assert config.general_settings.bind_address == "0.0.0.0"
                 assert config.general_settings.bind_port == 9000
+                assert config.general_settings.http_timeout == 300.0
         finally:
             os.unlink(config_path)
 
@@ -190,6 +192,7 @@ class TestLoadConfig:
                 config = await load_config_async()
                 assert config.general_settings.bind_address == "localhost"
                 assert config.general_settings.bind_port == 3000
+                assert config.general_settings.http_timeout == 300.0
 
     async def test_load_config_file_not_found(self):
         """Test error when config file doesn't exist"""
@@ -205,6 +208,7 @@ class TestLoadConfig:
                 "redis_host": "os.environ/REDIS_HOST",
                 "redis_port": "os.environ/REDIS_PORT",
                 "redis_password": "os.environ/REDIS_PASSWORD",
+                "http_timeout": "os.environ/HTTP_TIMEOUT",
             },
             "model_groups": [
                 {
@@ -233,6 +237,7 @@ class TestLoadConfig:
                     "REDIS_HOST": "redis.example.com",
                     "REDIS_PORT": "6379",
                     "REDIS_PASSWORD": "redis_secret",
+                    "HTTP_TIMEOUT": "150",
                     "API_URL": "https://api.example.com",
                     "API_KEY": "secret-key",
                 },
@@ -241,6 +246,7 @@ class TestLoadConfig:
                 assert config.general_settings.bind_address == "0.0.0.0"
                 # Note: bind_port will be converted to int by pydantic
                 assert config.general_settings.bind_port == 8080
+                assert config.general_settings.http_timeout == 150.0
         finally:
             os.unlink(config_path)
 

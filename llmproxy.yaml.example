@@ -47,6 +47,7 @@ model_groups:
 general_settings:
   bind_address: localhost
   bind_port: 4000
+  http_timeout: 300 # seconds
   num_retries: 3 # number of retries for each request
   allowed_fails: 1 # number of allowed fails for each endpoint
   cooldown_time: 60 # cooldown time for each endpoint

@@ -176,6 +176,7 @@ See `llmproxy.yaml` for a complete example. The bind address and port are set in
 general_settings:
   bind_address: 127.0.0.1
   bind_port: 5000
+  http_timeout: 300  # seconds
   # ... other settings
 ```
 
