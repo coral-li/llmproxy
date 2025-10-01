@@ -149,8 +149,11 @@ class BaseRequestHandler(ABC):
         if is_streaming:
             if isinstance(response, StreamingResponse):
                 return response
-            else:
-                raise HTTPException(500, "Streaming response error")
+            if isinstance(response, dict):
+                status_code = response.get("status_code", 500)
+                detail = response.get("error") or "Streaming request failed"
+                raise HTTPException(status_code, detail)
+            raise HTTPException(500, "Streaming response error")
         else:
             if response["status_code"] == 200:
                 data = response["data"]
