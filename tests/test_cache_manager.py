@@ -1,3 +1,5 @@
+import json
+
 import redis.asyncio as redis
 
 from llmproxy.core.cache_manager import CacheManager, StreamingCacheWriter
@@ -50,3 +52,123 @@ data: {"response": {"model": "gpt-4"}}
     result_invalid = writer._parse_responses_event(chunk_invalid_json)
     assert result_invalid is not None
     assert result_invalid.event_type == "response.created"
+
+
+def test_parse_responses_event_preserves_ids():
+    """Ensure responses API SSE parsing retains upstream identifier fields."""
+
+    cache_manager = CacheManager(redis.Redis(), cache_enabled=False)
+    writer = StreamingCacheWriter(cache_manager, {}, is_responses_api=True)
+
+    created_chunk = (
+        "event: response.created\n"
+        'data: {"type": "response.created", "response": {"id": "resp_original", "model": "gpt-4", "created": 1700000000, "status": "in_progress"}}\n'
+        "\n"
+    )
+    created = writer._parse_responses_event(created_chunk)
+    assert created is not None
+    assert created.metadata.get("response_id") == "resp_original"
+
+    item_chunk = (
+        "event: response.output_item.added\n"
+        'data: {"type": "response.output_item.added", "response_id": "resp_original", "output_index": 0, "item": {"id": "msg_original", "type": "message", "status": "in_progress", "role": "assistant", "summary": []}}\n'
+        "\n"
+    )
+    item = writer._parse_responses_event(item_chunk)
+    assert item is not None
+    assert item.metadata.get("item_id") == "msg_original"
+    assert item.metadata.get("response_id") == "resp_original"
+
+    completed_chunk = (
+        "event: response.completed\n"
+        'data: {"type": "response.completed", "response": {"id": "resp_original", "model": "gpt-4", "created": 1700000005, "status": "completed", "outputs": [{"id": "msg_original", "type": "message", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": "Hello"}]}]}}\n'
+        "\n"
+    )
+    completed = writer._parse_responses_event(completed_chunk)
+    assert completed is not None
+    assert completed.metadata.get("response_id") == "resp_original"
+    outputs = completed.metadata.get("outputs")
+    assert isinstance(outputs, list)
+    assert outputs and outputs[0].get("id") == "msg_original"
+
+
+def test_reconstruct_responses_stream_uses_cached_ids():
+    """Reconstruction should replay cached identifiers instead of minting new ones."""
+
+    cache_manager = CacheManager(redis.Redis(), cache_enabled=False)
+
+    normalized_chunks = [
+        {
+            "event_type": "response.created",
+            "data_type": "response",
+            "content": None,
+            "metadata": {
+                "model": "gpt-4",
+                "created": 1700000000,
+                "response_id": "resp_original",
+                "status": "in_progress",
+            },
+        },
+        {
+            "event_type": "response.output_item.added",
+            "data_type": "message",
+            "content": None,
+            "metadata": {
+                "output_index": 0,
+                "summary": [],
+                "item_id": "msg_original",
+                "item_status": "in_progress",
+                "item_role": "assistant",
+                "response_id": "resp_original",
+            },
+        },
+        {
+            "event_type": "response.output_text.delta",
+            "data_type": "text",
+            "content": "Hello ",
+            "metadata": {"output_index": 0, "content_index": 0},
+        },
+        {
+            "event_type": "response.completed",
+            "data_type": "response",
+            "content": None,
+            "metadata": {
+                "model": "gpt-4",
+                "created": 1700000005,
+                "response_id": "resp_original",
+                "outputs": [
+                    {
+                        "id": "msg_original",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Hello "}],
+                    }
+                ],
+            },
+        },
+    ]
+
+    reconstructed = cache_manager._reconstruct_responses_stream(normalized_chunks)
+    data_events = [
+        json.loads(line[len("data: ") :].strip())
+        for line in reconstructed
+        if line.startswith("data: ")
+    ]
+
+    created_event = next(
+        ev for ev in data_events if ev.get("type") == "response.created"
+    )
+    assert created_event["response"]["id"] == "resp_original"
+
+    output_added_event = next(
+        ev for ev in data_events if ev.get("type") == "response.output_item.added"
+    )
+    assert output_added_event["item"]["id"] == "msg_original"
+
+    completed_event = next(
+        ev for ev in data_events if ev.get("type") == "response.completed"
+    )
+    assert completed_event["response"]["id"] == "resp_original"
+    outputs = completed_event["response"].get("outputs", [])
+    assert outputs and outputs[0].get("id") == "msg_original"
