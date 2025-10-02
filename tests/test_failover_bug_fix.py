@@ -56,6 +56,10 @@ async def test_failover_tries_different_endpoints():
         model="gpt-3.5-turbo", weight=1, params={"base_url": "https://api3.example.com"}
     )
 
+    mock_load_balancer.endpoint_configs = {
+        "gpt-3.5-turbo": [endpoint1, endpoint2, endpoint3]
+    }
+
     # Mock load balancer to return different endpoints in sequence
     mock_load_balancer.select_endpoint.side_effect = [
         endpoint1,
@@ -145,6 +149,8 @@ async def test_failover_stops_when_all_endpoints_attempted():
         model="gpt-3.5-turbo", weight=1, params={"base_url": "https://api2.example.com"}
     )
 
+    mock_load_balancer.endpoint_configs = {"gpt-3.5-turbo": [endpoint1, endpoint2]}
+
     # Mock load balancer to always return the same 2 endpoints in rotation
     mock_load_balancer.select_endpoint.side_effect = [
         endpoint1,
@@ -176,11 +182,12 @@ async def test_failover_stops_when_all_endpoints_attempted():
 
     # Should only try each endpoint once, even though num_retries=10
     assert mock_llm_client.create_chat_completion.call_count == 2
+    assert mock_load_balancer.select_endpoint.call_count == 2
     assert mock_load_balancer.record_failure.call_count == 2
 
-    # Verify the final response (returns last error response)
-    assert result["status_code"] == 500
-    assert "Internal server error" in result["error"]
+    # Verify the final response indicates exhausted endpoints
+    assert result["status_code"] == 503
+    assert "All endpoints failed" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -216,6 +223,7 @@ async def test_failover_returns_503_when_no_endpoints_available():
     # Mock load balancer to return None (no endpoints available)
     mock_load_balancer.select_endpoint.return_value = None
     mock_load_balancer.get_model_groups.return_value = ["gpt-3.5-turbo"]
+    mock_load_balancer.endpoint_configs = {"gpt-3.5-turbo": []}
 
     # Mock cache manager
     mock_cache_manager._should_cache.return_value = False
@@ -277,6 +285,8 @@ async def test_failover_succeeds_on_second_endpoint():
     endpoint2 = Endpoint(
         model="gpt-3.5-turbo", weight=1, params={"base_url": "https://api2.example.com"}
     )
+
+    mock_load_balancer.endpoint_configs = {"gpt-3.5-turbo": [endpoint1, endpoint2]}
 
     # Mock load balancer
     mock_load_balancer.select_endpoint.side_effect = [

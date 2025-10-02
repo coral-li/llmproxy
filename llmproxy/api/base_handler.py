@@ -1,6 +1,6 @@
 import time
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, Dict, Optional, Set, Union
+from typing import Any, AsyncGenerator, Dict, Optional, Set, Tuple, Union
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
@@ -176,6 +176,7 @@ class BaseRequestHandler(ABC):
 
         # Keep track of endpoints we've already tried for this request
         attempted_endpoints: Set[str] = set()
+        endpoints_exhausted = False
 
         # Calculate max selection attempts
         endpoint_pool = getattr(self.load_balancer, "endpoint_configs", {})
@@ -189,29 +190,36 @@ class BaseRequestHandler(ABC):
         last_response = None
 
         for attempt in range(self.config.general_settings.num_retries):
-            # Try to find an endpoint that hasn't been attempted yet
-            endpoint = None
-            for _ in range(max_selection_attempts):
-                candidate = await self.load_balancer.select_endpoint(
-                    model_group, exclude_ids=attempted_endpoints
-                )
-                if not candidate:
-                    return self._no_endpoint_response(model_group)
-                # Guard against mocked/selectors that ignore exclude_ids
-                if candidate.id in attempted_endpoints:
-                    continue
-                endpoint = candidate
-                break
-
-            if not endpoint:
-                # All available endpoints have been attempted
+            if total_endpoints and len(attempted_endpoints) >= total_endpoints:
+                endpoints_exhausted = True
                 logger.warning(
-                    "all_available_endpoints_attempted",
+                    "all_endpoints_exhausted_before_retry",
                     model_group=model_group,
                     attempted_count=len(attempted_endpoints),
+                    total_endpoints=total_endpoints,
                     attempt=attempt + 1,
                 )
                 break
+            # Try to find an endpoint that hasn't been attempted yet
+            endpoint, selection_stalled, duplicate_selection_attempts = (
+                await self._select_candidate_endpoint(
+                    model_group, attempted_endpoints, max_selection_attempts
+                )
+            )
+
+            if endpoint is None:
+                if selection_stalled:
+                    endpoints_exhausted = True
+                    logger.warning(
+                        "load_balancer_selection_exhausted",
+                        model_group=model_group,
+                        attempted_count=len(attempted_endpoints),
+                        max_selection_attempts=max_selection_attempts,
+                        duplicate_selection_attempts=duplicate_selection_attempts,
+                        attempt=attempt + 1,
+                    )
+                    break
+                return self._no_endpoint_response(model_group)
 
             attempted_endpoints.add(endpoint.id)
             try:
@@ -233,7 +241,28 @@ class BaseRequestHandler(ABC):
                 )
             except Exception as e:
                 last_response = await self._handle_exception(endpoint, e, is_streaming)
+        if endpoints_exhausted:
+            return self._all_endpoints_failed_response()
         return last_response or self._all_endpoints_failed_response()
+
+    async def _select_candidate_endpoint(
+        self,
+        model_group: str,
+        attempted_endpoints: Set[str],
+        max_selection_attempts: int,
+    ) -> Tuple[Optional[Endpoint], bool, int]:
+        duplicate_attempts = 0
+        for _ in range(max_selection_attempts):
+            candidate = await self.load_balancer.select_endpoint(
+                model_group, exclude_ids=attempted_endpoints
+            )
+            if not candidate:
+                return None, False, duplicate_attempts
+            if candidate.id in attempted_endpoints:
+                duplicate_attempts += 1
+                continue
+            return candidate, False, duplicate_attempts
+        return None, True, duplicate_attempts
 
     def _no_endpoint_response(self, model_group: str) -> dict:
         """Response when no endpoints are available"""
