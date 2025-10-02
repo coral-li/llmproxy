@@ -1,6 +1,5 @@
-import asyncio
 import random
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from llmproxy.config_model import LLMProxyConfig
 from llmproxy.core.logger import get_logger
@@ -88,11 +87,16 @@ class LoadBalancer:
             logger.error("no_endpoints_configured", model_group=model_group)
             return None
 
-        if self.state_manager:
-            await self._log_endpoint_states(configs, model_group)
+        availability, state_lookup = await self._get_availability_snapshot(
+            configs, model_group
+        )
 
-        primary_available, fallback_available = await self._get_available_endpoints(
-            configs
+        await self._log_endpoint_states(
+            configs, model_group, state_lookup, availability
+        )
+
+        primary_available, fallback_available = self._split_available_endpoints(
+            configs, availability
         )
 
         # Use primary endpoints if available
@@ -136,8 +140,8 @@ class LoadBalancer:
 
         return selected
 
-    async def _get_available_endpoints(
-        self, configs: List[Endpoint]
+    def _split_available_endpoints(
+        self, configs: List[Endpoint], availability: Dict[str, bool]
     ) -> Tuple[List[Endpoint], List[Endpoint]]:
         primary_available: List[Endpoint] = []
         fallback_available: List[Endpoint] = []
@@ -145,17 +149,8 @@ class LoadBalancer:
         if not configs:
             return primary_available, fallback_available
 
-        if self.state_manager:
-            availability_list = await asyncio.gather(
-                *(
-                    self.state_manager.is_endpoint_available(endpoint_config.id)
-                    for endpoint_config in configs
-                )
-            )
-        else:
-            availability_list = [True for _ in configs]
-
-        for endpoint_config, is_available in zip(configs, availability_list):
+        for endpoint_config in configs:
+            is_available = availability.get(endpoint_config.id, True)
             if is_available:
                 if endpoint_config.weight > 0:
                     primary_available.append(endpoint_config)
@@ -165,29 +160,16 @@ class LoadBalancer:
         return primary_available, fallback_available
 
     async def _log_endpoint_states(
-        self, configs: List[Endpoint], model_group: str
+        self,
+        configs: List[Endpoint],
+        model_group: str,
+        state_lookup: Dict[str, Optional[Dict[str, Any]]],
+        availability: Dict[str, bool],
     ) -> None:
-        if not self.state_manager:
-            logger.info(
-                "selecting_endpoint",
-                model_group=model_group,
-                endpoints=[],
-            )
-            return
-
-        # Fetch state and availability for all endpoints in parallel
-        per_endpoint_results = await asyncio.gather(
-            *(
-                asyncio.gather(
-                    self.state_manager.get_endpoint_state(config.id),
-                    self.state_manager.is_endpoint_available(config.id),
-                )
-                for config in configs
-            )
-        )
-
-        endpoint_states: List[Dict] = []
-        for config, (state, is_available) in zip(configs, per_endpoint_results):
+        endpoint_states: List[Dict[str, Any]] = []
+        for config in configs:
+            state = state_lookup.get(config.id)
+            is_available = availability.get(config.id, True)
             endpoint_states.append(
                 {
                     "id": config.id,
@@ -206,6 +188,43 @@ class LoadBalancer:
             model_group=model_group,
             endpoints=endpoint_states,
         )
+
+    async def _get_availability_snapshot(
+        self, configs: List[Endpoint], model_group: str
+    ) -> Tuple[Dict[str, bool], Dict[str, Optional[Dict[str, Any]]]]:
+        if not configs or not self.state_manager:
+            return {endpoint.id: True for endpoint in configs}, {
+                endpoint.id: None for endpoint in configs
+            }
+
+        endpoint_ids = [endpoint.id for endpoint in configs]
+
+        availability: Dict[str, bool] = {
+            endpoint_id: True for endpoint_id in endpoint_ids
+        }
+        state_lookup: Dict[str, Optional[Dict[str, Any]]] = {
+            endpoint_id: None for endpoint_id in endpoint_ids
+        }
+
+        try:
+            availability, state_lookup = await self.state_manager.get_availability_bulk(
+                endpoint_ids
+            )
+            await self.state_manager.refresh_ttl_bulk(
+                [
+                    endpoint_id
+                    for endpoint_id in endpoint_ids
+                    if state_lookup.get(endpoint_id)
+                ]
+            )
+        except Exception as exc:
+            logger.error(
+                "bulk_availability_fetch_failed",
+                model_group=model_group,
+                error=str(exc),
+            )
+
+        return availability, state_lookup
 
     async def record_success(self, endpoint: Endpoint) -> None:
         """Record successful request for an endpoint (in Redis)"""
@@ -260,17 +279,23 @@ class LoadBalancer:
         stats = {}
 
         if not self.state_manager:
-            # Return basic config if no state manager
             for model_group, configs in self.endpoint_configs.items():
                 stats[model_group] = [config.get_config_dict() for config in configs]
             return stats
 
         for model_group, configs in self.endpoint_configs.items():
+            endpoint_ids = [config.id for config in configs]
+            bulk_stats = await self.state_manager.get_endpoint_stats_bulk(endpoint_ids)
             endpoint_stats = []
             for config in configs:
-                # Get fresh stats from Redis
-                stat_data = await self.state_manager.get_endpoint_stats(config.id)
-                endpoint_stats.append(stat_data)
+                raw_state = bulk_stats.get(config.id, {})
+                endpoint_stats.append(
+                    {
+                        "id": config.id,
+                        "config": config.get_config_dict(),
+                        "state": raw_state,
+                    }
+                )
             stats[model_group] = endpoint_stats
 
         return stats

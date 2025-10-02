@@ -154,7 +154,6 @@ app = FastAPI(
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     """Health check endpoint."""
-    global load_balancer, redis_manager, endpoint_state_manager  # Updated: use redis_manager
 
     redis_connected = False
     state_sharing_enabled = False
