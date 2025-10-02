@@ -1,275 +1,179 @@
 # LLMProxy
 
-A high-performance proxy server for Large Language Models (LLMs) that provides intelligent load balancing, automatic failover, rate limiting, and response caching.
+LLMProxy is a FastAPI-based proxy that load balances across multiple Large Language Model (LLM) providers. It handles failover, retries, caching, and rate limits for you while remaining fully compatible with the OpenAI API surface.
 
-## Features
+## Why LLMProxy?
 
-- **Load Balancing**: Distribute requests across multiple LLM endpoints using weighted round-robin
-- **Automatic Failover**: Seamlessly switch to backup endpoints when primary endpoints fail
-- **Rate Limit Management**: Track and respect API rate limits to prevent 429 errors
-- **Response Caching**: Cache deterministic responses in Redis for improved performance
-- **Streaming Cache**: Cache and replay streaming responses for faster real-time interactions
-- **OpenAI Compatible**: Drop-in replacement for OpenAI API clients (both Chat Completions and Responses APIs)
-- **Multi-Provider Support**: Works with OpenAI and Azure OpenAI endpoints
-- **Health Monitoring**: Track endpoint health and automatically cooldown failed endpoints
-- **Responses API Support**: Support for OpenAI's new Responses API
-- **Comprehensive test suite with automated setup**: Tests automatically start and stop proxy instances
+- **Provider-agnostic**: Register OpenAI, Azure OpenAI, and any OpenAI-compatible endpoints in a single configuration.
+- **Graceful failover**: Automatically detect failing upstreams, cool them down, and retry requests against healthy endpoints.
+- **Observability built in**: Health and statistics endpoints expose live state; Redis-backed state tracking keeps multiple proxy instances in sync.
+- **Deterministic caching**: Cache both regular and streaming responses in Redis with fine-grained controls and manual cache invalidation.
+- **Drop-in OpenAI compatibility**: Reuse existing SDK clients (chat completions, responses, embeddings) by only changing the base URL.
+- **Battle-tested test suite**: End-to-end pytest harness spins up mock upstreams, Redis, and the proxy itself for reliable CI.
+
+## Project Layout
+
+```
+llmproxy/
+  api/          # OpenAI-compatible route handlers (chat, responses, embeddings)
+  clients/      # Async HTTP client with streaming + retry helpers
+  core/         # Caching, Redis, logging utilities
+  managers/     # Load balancer + endpoint state management
+  config/       # Pydantic config models & YAML loader
+tests/          # Pytest suite with mock upstream servers
+```
 
 ## Quick Start
 
-### Prerequisites
+### Requirements
 
-- Python 3.8+
-- Redis server
-- API keys for OpenAI and/or Azure OpenAI
+- Python 3.9 or newer (3.11+ recommended)
+- Redis 6+
+- API keys for your upstream providers (OpenAI, Azure OpenAI, etc.)
 
-### Installation
+### 1. Clone and install
 
-#### Option 1: Install from GitHub (Recommended)
-
-```bash
-# Install directly from GitHub
-pip install git+https://github.com/yourusername/llmproxy.git
-
-# Or install in development mode
-git clone https://github.com/yourusername/llmproxy.git
-cd llmproxy
-pip install -e .
-```
-
-#### Option 2: Local Development Setup
-
-1. Clone the repository:
 ```bash
 git clone https://github.com/yourusername/llmproxy.git
 cd llmproxy
-```
-
-2. Install dependencies:
-```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -e .
 ```
 
-### Configuration
+For development tooling (black, mypy, etc.):
 
-1. Create your configuration file:
 ```bash
-# Copy the example configuration
+pip install -e ".[dev]"
+pre-commit install
+```
+
+### 2. Configure credentials
+
+```bash
 cp llmproxy.yaml.example llmproxy.yaml
-```
-
-2. Set up environment variables:
-```bash
 cp env.example .env
-# Edit .env with your API keys and configuration
 ```
 
-3. Edit `llmproxy.yaml` with your specific configuration (API keys, endpoints, etc.)
+Fill in provider keys and Redis connection info in `.env`, then update `llmproxy.yaml` to point at your upstream endpoints. Configuration supports `os.environ/VARNAME` references so secrets can stay in the environment.
 
-### Running
+Key sections in `llmproxy.yaml`:
 
-1. Start Redis (if not already running):
+- `model_groups`: group endpoints that serve the same model (weights control routing bias).
+- `general_settings`: bind address/port, retry/cooldown behavior, Redis connection.
+- `cache_params`: optional cache override settings (namespace, TTL, custom Redis host).
+
+### 3. Run the proxy
+
+Start Redis if you do not have one running already (`brew services start redis` on macOS). Then launch the proxy:
+
 ```bash
-# macOS
-brew services start redis
-
-# Linux
-sudo systemctl start redis
-
-# Or manually
-redis-server
+llmproxy --config llmproxy.yaml
+# or
+python -m llmproxy.cli --log-level INFO
 ```
 
-2. Run the proxy:
-```bash
-python -m llmproxy.cli
-```
+By default the proxy reads `llmproxy.yaml` in the working directory and binds to the address/port defined under `general_settings` (`127.0.0.1:4243` in the sample file).
 
-The proxy will start on the address and port configured in `llmproxy.yaml` (default: `http://127.0.0.1:5000`).
+Environment-based config: set `LLMPROXY_CONFIG=/path/to/config.yaml` to point the proxy at another file.
 
-### Usage
+## Using LLMProxy
 
-Use any OpenAI-compatible client and point it to the proxy:
+Any OpenAI SDK can target the proxy by swapping the base URL. Authentication to upstream providers is handled by the proxy.
 
-#### Chat Completions API
-
-```python
-from openai import OpenAI
-
-# Point to the local proxy instead of OpenAI
-# The proxy URL is configured in llmproxy.yaml
-client = OpenAI(
-    base_url="http://127.0.0.1:5000",  # Match your llmproxy.yaml settings
-    api_key="dummy-key"  # Auth is handled by proxy
-)
-
-# Use as normal
-response = client.chat.completions.create(
-    model="gpt-3.5-turbo",
-    messages=[{"role": "user", "content": "Hello!"}]
-)
-```
-
-#### Streaming with Caching
-
-LLMProxy now supports caching for streaming responses, dramatically improving performance for repeated streaming requests.
-
-You can also disable caching for specific requests:
-
-```python
-# Disable cache for this request
-response = client.chat.completions.create(
-    model="gpt-3.5-turbo",
-    messages=[{"role": "user", "content": "What's the weather?"}],
-    extra_body={"cache": {"no-cache": True}}  # Bypass cache
-)
-```
-
-#### Responses API (New)
+### Chat Completions
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://127.0.0.1:5000",  # No /v1 prefix for Responses API
-    api_key="dummy-key"
+    base_url="http://127.0.0.1:4243",
+    api_key="dummy-key",  # ignored by the proxy
 )
 
-# Use the new Responses API
-response = client.responses.create(
-    model="gpt-4.1",
-    input=[{"role": "user", "content": "Hello!"}]
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello from LLMProxy"}],
 )
 
-# Access the response
-print(response.output_text)
+print(response.choices[0].message.content)
 ```
 
-##### Streaming with Caching (Responses API)
-
-The Responses API now also supports caching for streaming responses.
-
-You can also disable caching for specific requests:
+### Responses API + Streaming Cache
 
 ```python
-# Disable cache for this request
 response = client.responses.create(
     model="gpt-4.1",
-    input=[{"role": "user", "content": "What's the weather?"}],
-    extra_body={"cache": {"no-cache": True}}  # Bypass cache
+    input=[{"role": "user", "content": "Tell me a story"}],
+    stream=True,
 )
+
+for event in response:
+    # Streaming events are cached; repeated requests replay immediately
+    print(event)
 ```
 
-### Configuration
+Disable caching per-request by passing `extra_body={"cache": {"no-cache": True}}`.
 
-Edit `llmproxy.yaml` to configure:
+### Embeddings
 
-- Model groups and endpoints
-- Weights for load distribution
-- Rate limiting and retry settings
-- Caching parameters
-- Bind address and port (configurable via `llmproxy.yaml`)
+```python
+embeddings = client.embeddings.create(
+    model="text-embedding-3-large",
+    input="Searchable content",
+)
 
-See `llmproxy.yaml` for a complete example. The bind address and port are set in the `general_settings` section:
-
-```yaml
-general_settings:
-  bind_address: 127.0.0.1
-  bind_port: 5000
-  http_timeout: 300  # seconds
-  # ... other settings
+vector = embeddings.data[0].embedding
 ```
 
-### API Endpoints
+### Administrative Endpoints
 
-- `POST /chat/completions` - OpenAI-compatible chat completions
-- `POST /responses` - OpenAI's new Responses API
-- `GET /health` - Health check endpoint
-- `GET /stats` - Proxy statistics and endpoint status
+- `GET /health`: readiness info, upstream counts, Redis state.
+- `GET /stats`: live per-endpoint statistics pulled from Redis.
+- `DELETE /cache`: invalidate cached responses (useful for testing).
 
+## Configuration Deep Dive
 
-## Architecture
+`llmproxy/config_model.py` defines the schema enforced at load time. Highlights:
 
-LLMProxy uses:
-- **FastAPI** for high-performance async request handling
-- **Redis** for caching and rate limit tracking
-- **httpx** for async HTTP client requests
-- **Pydantic** for configuration validation
+- Weighted round-robin routing per `model_group` with Azure/OpenAI parameters stored under `params`.
+- Redis-backed endpoint state shared across processes via `EndpointStateManager`.
+- Tunable retry/cooldown thresholds (`allowed_fails`, `cooldown_time`, `num_retries`).
+- Optional dedicated cache namespace and TTL overrides.
 
-## Testing
+The async loader in `llmproxy/config/config_loader.py` resolves `os.environ/VAR` references and merges missing cache fields from general Redis settings.
 
-The test suite now automatically starts and stops proxy instances, eliminating the need to manually start the proxy before running tests.
+## Architecture Overview
 
-### Prerequisites
+1. `FastAPI` app (`llmproxy/main.py`) wires the lifespan events, initializes Redis, cache, LLM client, and the load balancer.
+2. `LoadBalancer` selects an endpoint per request, tracking health stats in Redis so multiple instances can share state.
+3. `LLMClient` issues upstream HTTP/streaming requests with retries, respecting per-endpoint configuration.
+4. `CacheManager` stores deterministic responses in Redis and replays streaming content from cached chunks.
+5. Request handlers in `llmproxy/api` expose OpenAI-compatible endpoints (`/chat/completions`, `/responses`, `/embeddings`).
 
-- The `redis-server` binary must be installed (tests will start a temporary
-  instance if Redis is not already running on port 6379)
-- The `requests` package (included in pyproject.toml dependencies)
-
-### Running Tests
+## Development Workflow
 
 ```bash
-# Run all tests
-python -m pytest tests/
-
-# Run specific tests
-python -m pytest tests/test_proxy_live_pytest.py::TestProxyLive::test_basic_completion -v
-
-# Run tests with minimal output
-python -m pytest tests/ -v --tb=no
+make install-dev   # editable install + dev dependencies + pre-commit
+make pre-commit    # format, lint, type-check
+make test          # run full pytest suite (starts mock servers + Redis)
 ```
 
-### Test Features
+Pytest spins up mock upstream servers, a dedicated proxy instance, and handles Redis automatically. Tests cover caching behavior, failover logic, streaming, and CLI ergonomics.
 
-- **Automated server management**: Tests automatically start mock LLM endpoints and proxy instances
-- **Session-scoped fixtures**: Server startup/shutdown happens once per test session for efficiency
-- **Isolated test environments**: Each test run uses random ports to avoid conflicts
-- **Redis requirement validation**: Tests fail fast if Redis is not available
-- **Comprehensive coverage**: Tests cover basic completions, streaming, caching, load balancing, error handling, and more
+Useful scripts:
 
-### Test Architecture
-
-The test setup includes:
-
-1. **Mock OpenAI servers**: Lightweight FastAPI servers that simulate OpenAI API endpoints
-2. **Automated proxy startup**: Uses the actual proxy application with test configuration
-3. **Cache management**: Automatic cache clearing between test sessions
-4. **Health monitoring**: Waits for services to be ready before running tests
-
-### Configuration
-
-Tests use `llmproxy.test.yaml` which configures:
-- Mock endpoints on localhost:8001-8003
-- Redis caching with test namespace
-- Reduced timeouts for faster test execution
-
-## Configuration
-
-See `llmproxy.yaml.example` for full configuration options.
-
-## Development
-
-The automated test setup makes development much easier:
-
-1. No need to manually start/stop services
-2. Tests run in isolation with their own proxy instances
-3. Automatic cleanup prevents port conflicts
-4. Fast feedback loop for development
-
-## Requirements
-
-- Python 3.8+
-- Redis server
-- See `pyproject.toml` for Python dependencies
+- `clear_cache.sh`: quick helper to hit the `/cache` endpoint locally.
+- `make test-cov`: generate HTML coverage in `htmlcov/`.
 
 ## Contributing
 
-1. Ensure Redis is running
-2. Run the test suite: `python -m pytest tests/`
-3. All tests should pass before submitting changes
+1. Install dev dependencies and enable pre-commit.
+2. Make your changes with accompanying tests.
+3. Run `make pre-commit` and `make test` before opening a PR.
 
-The automated test setup ensures consistent testing across different development environments.
+We welcome improvements to additional providers, caching strategies, and observability tooling.
 
 ## License
 
-MIT License - see LICENSE file for details
+MIT License - see `LICENSE` for details.

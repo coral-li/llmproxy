@@ -137,7 +137,10 @@ class TestLoadBalancer:
     async def test_select_endpoint_with_primary_available(self):
         """Test selecting endpoint when primary endpoints are available"""
         mock_state_manager = AsyncMock(spec=EndpointStateManager)
-        mock_state_manager.is_endpoint_available.return_value = True
+        mock_state_manager.get_availability_bulk.return_value = (
+            {"test-model": True, "test-model-2": True},
+            {"test-model": {}, "test-model-2": {}},
+        )
 
         lb = LoadBalancer(state_manager=mock_state_manager)
 
@@ -150,8 +153,8 @@ class TestLoadBalancer:
             result = await lb.select_endpoint("test-model")
 
         assert result == endpoint1
-        # is_endpoint_available is called twice in _get_available_endpoints and twice in _log_endpoint_states
-        assert mock_state_manager.is_endpoint_available.call_count == 4
+        mock_state_manager.get_availability_bulk.assert_called_once()
+        mock_state_manager.refresh_ttl_bulk.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_select_endpoint_fallback_to_weight_zero(self):
@@ -164,7 +167,16 @@ class TestLoadBalancer:
                 return False
             return True
 
-        mock_state_manager.is_endpoint_available.side_effect = mock_availability
+        mock_state_manager.get_availability_bulk.return_value = (
+            {
+                "primary-endpoint": False,
+                "fallback-endpoint": True,
+            },
+            {
+                "primary-endpoint": {},
+                "fallback-endpoint": {},
+            },
+        )
 
         lb = LoadBalancer(state_manager=mock_state_manager)
 
@@ -180,24 +192,45 @@ class TestLoadBalancer:
 
         lb.endpoint_configs["test-model"] = [primary_endpoint, fallback_endpoint]
 
+        mock_state_manager.get_availability_bulk.return_value = (
+            {
+                primary_endpoint.id: False,
+                fallback_endpoint.id: True,
+            },
+            {
+                primary_endpoint.id: {},
+                fallback_endpoint.id: {},
+            },
+        )
+
         result = await lb.select_endpoint("test-model")
 
         assert result == fallback_endpoint
+        mock_state_manager.refresh_ttl_bulk.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_select_endpoint_no_available_endpoints(self):
         """Test selecting endpoint when no endpoints are available"""
         mock_state_manager = AsyncMock(spec=EndpointStateManager)
-        mock_state_manager.is_endpoint_available.return_value = False
+        mock_state_manager.get_availability_bulk.return_value = (
+            {"test-endpoint": False},
+            {"test-endpoint": {}},
+        )
 
         lb = LoadBalancer(state_manager=mock_state_manager)
 
         endpoint = Endpoint(model="test", weight=1, params={"api_key": "key"})
         lb.endpoint_configs["test-model"] = [endpoint]
 
+        mock_state_manager.get_availability_bulk.return_value = (
+            {endpoint.id: False},
+            {endpoint.id: {}},
+        )
+
         result = await lb.select_endpoint("test-model")
 
         assert result is None
+        mock_state_manager.refresh_ttl_bulk.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_select_endpoint_without_state_manager(self):
@@ -324,17 +357,6 @@ class TestLoadBalancer:
     async def test_get_all_endpoints_stats(self):
         """Test getting all endpoints stats"""
         mock_state_manager = AsyncMock(spec=EndpointStateManager)
-        mock_state_manager.get_endpoint_stats.return_value = {
-            "id": "test-id",
-            "model": "test-model",
-            "weight": 1,
-            "base_url": "https://api.test.com",
-            "state": {
-                "status": "healthy",
-                "consecutive_failures": 0,
-                "last_failure_time": None,
-            },
-        }
 
         lb = LoadBalancer(state_manager=mock_state_manager)
 
@@ -344,6 +366,21 @@ class TestLoadBalancer:
         lb.endpoint_configs["group1"] = [endpoint1]
         lb.endpoint_configs["group2"] = [endpoint2]
 
+        mock_state_manager.get_endpoint_stats_bulk.return_value = {
+            endpoint1.id: {
+                "id": endpoint1.id,
+                "model": endpoint1.model,
+                "weight": endpoint1.weight,
+                "status": "healthy",
+            },
+            endpoint2.id: {
+                "id": endpoint2.id,
+                "model": endpoint2.model,
+                "weight": endpoint2.weight,
+                "status": "cooling_down",
+            },
+        }
+
         result = await lb.get_all_endpoints_stats()
 
         assert "group1" in result
@@ -351,13 +388,11 @@ class TestLoadBalancer:
         assert len(result["group1"]) == 1
         assert len(result["group2"]) == 1
 
-        # Check structure of returned stats
         stats1 = result["group1"][0]
-        assert "id" in stats1
-        assert "model" in stats1
-        assert "weight" in stats1
-        assert "base_url" in stats1
-        assert "state" in stats1
+        assert stats1["id"] == endpoint1.id
+        assert stats1["config"]["model"] == endpoint1.model
+        assert stats1["state"]["status"] == "healthy"
+        mock_state_manager.get_endpoint_stats_bulk.assert_called()
 
     @pytest.mark.asyncio
     async def test_get_all_endpoints_stats_without_state_manager(self):
@@ -403,21 +438,15 @@ class TestLoadBalancer:
     async def test_log_endpoint_states(self):
         """Test logging endpoint states"""
         mock_state_manager = AsyncMock(spec=EndpointStateManager)
-        mock_state_manager.get_endpoint_state.return_value = {
-            "status": "healthy",
-            "consecutive_failures": 0,
-        }
-        mock_state_manager.is_endpoint_available.return_value = True
 
         lb = LoadBalancer(state_manager=mock_state_manager)
 
         endpoint = Endpoint(model="test", weight=1, params={"api_key": "key"})
 
-        # This is a private method, but we can test it directly
-        await lb._log_endpoint_states([endpoint], "test-model")
+        availability = {endpoint.id: True}
+        states = {endpoint.id: {"status": "healthy"}}
 
-        mock_state_manager.get_endpoint_state.assert_called_once_with(endpoint.id)
-        mock_state_manager.is_endpoint_available.assert_called_once_with(endpoint.id)
+        await lb._log_endpoint_states([endpoint], "test-model", states, availability)
 
     @pytest.mark.asyncio
     async def test_get_available_endpoints(self):
@@ -428,7 +457,10 @@ class TestLoadBalancer:
         def mock_availability(endpoint_id):
             return endpoint_id == "endpoint1"
 
-        mock_state_manager.is_endpoint_available.side_effect = mock_availability
+        mock_state_manager.get_availability_bulk.side_effect = lambda ids: (
+            {endpoint_id: True for endpoint_id in ids},
+            {endpoint_id: {"status": "healthy"} for endpoint_id in ids},
+        )
 
         lb = LoadBalancer(state_manager=mock_state_manager)
 
@@ -443,11 +475,20 @@ class TestLoadBalancer:
 
         configs = [endpoint1, endpoint2, endpoint3]
 
-        primary_available, fallback_available = await lb._get_available_endpoints(
-            configs
+        availability = {
+            endpoint1.id: True,
+            endpoint2.id: False,
+            endpoint3.id: True,
+        }
+
+        primary_available, fallback_available = lb._split_available_endpoints(
+            configs, availability
         )
 
         # Only endpoint1 should be available and it has weight > 0
-        assert len(primary_available) == 1
+        assert len(primary_available) == 2
         assert primary_available[0] == endpoint1
-        assert len(fallback_available) == 0  # endpoint2 is not available
+        assert primary_available[1] == endpoint3
+
+        # endpoint2 should be in fallback with weight 0 but only if available
+        assert len(fallback_available) == 0
