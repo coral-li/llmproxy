@@ -46,6 +46,15 @@ class EventAwareChunk:
         )
 
 
+class StreamingCacheAborted(RuntimeError):
+    """Raised when streaming cache must halt due to an upstream error."""
+
+    def __init__(self, chunk: Optional[str], error: Optional[dict] = None):
+        super().__init__("Streaming cache aborted after upstream error chunk")
+        self.chunk = chunk
+        self.error = error or {}
+
+
 class CacheManager:
     """Manages LLM response caching with intelligent key generation"""
 
@@ -410,8 +419,19 @@ class CacheManager:
         is_responses_api = "input" in request_data and "messages" not in request_data
         key_suffix = ":responses_stream" if is_responses_api else ":stream"
         key = f"{self._generate_cache_key(request_data)}{key_suffix}"
+        sentinel_key = f"{key}:error"
 
         try:
+            sentinel_value = await self.redis.get(sentinel_key)
+            if sentinel_value:
+                self._streaming_misses += 1
+                logger.debug(
+                    "streaming_cache_bypassed_due_to_error",
+                    key=key,
+                    api_type="responses" if is_responses_api else "chat",
+                )
+                return None
+
             # For responses API, get normalized chunks
             if is_responses_api:
                 normalized_data = await self.redis.get(f"{key}:normalized")
@@ -642,10 +662,53 @@ class StreamingCacheWriter:
         # Indicates if we have observed any non-empty content so that we only cache
         # meaningful responses.
         self._has_content: bool = False
+        self._error_payload: Optional[dict] = None
+        self._sentinel_cleared = False
 
     def _stream_key(self) -> str:
         suffix = ":responses_stream" if self.is_responses_api else ":stream"
         return f"{self.cache_manager._generate_cache_key(self.request_data)}{suffix}"
+
+    def _error_sentinel_key(self) -> str:
+        return f"{self._stream_key()}:error"
+
+    async def _clear_failure_sentinel(self) -> None:
+        if self._sentinel_cleared:
+            return
+
+        try:
+            await self.cache_manager.redis.delete(self._error_sentinel_key())
+            logger.debug(
+                "streaming_cache_sentinel_cleared",
+                key=self._error_sentinel_key(),
+            )
+        except Exception as sentinel_error:  # pragma: no cover - best effort cleanup
+            logger.debug(
+                "streaming_cache_sentinel_clear_failed",
+                key=self._error_sentinel_key(),
+                error=str(sentinel_error),
+            )
+        finally:
+            self._sentinel_cleared = True
+
+    async def _mark_stream_failure(self) -> None:
+        try:
+            await self.cache_manager.redis.setex(
+                self._error_sentinel_key(),
+                self.cache_manager.ttl,
+                "1",
+            )
+            logger.debug(
+                "streaming_cache_failure_sentinel_set",
+                key=self._error_sentinel_key(),
+                error_payload=self._error_payload,
+            )
+        except Exception as sentinel_error:  # pragma: no cover - best effort cleanup
+            logger.debug(
+                "streaming_cache_failure_sentinel_error",
+                key=self._error_sentinel_key(),
+                error=str(sentinel_error),
+            )
 
     async def _handle_stream_cleanup(self) -> None:
         """Remove any partially written cache artifacts when a stream fails."""
@@ -665,6 +728,11 @@ class StreamingCacheWriter:
                 keys=cleanup_keys,
                 error=str(cleanup_error),
             )
+        finally:
+            await self._mark_stream_failure()
+            self.buffered_lines = []
+            self.normalized_chunks = None
+            self._has_content = False
 
     def _parse_sse_lines(self, chunk: str) -> Tuple[Optional[str], Optional[dict]]:
         """Parse SSE lines to extract event type and data"""
@@ -770,14 +838,16 @@ class StreamingCacheWriter:
             error_occurred=self._error_occurred,
         )
 
+        await self._clear_failure_sentinel()
+
         # Don't cache if error occurred
         if self._error_occurred:
-            return chunk
+            raise StreamingCacheAborted(chunk, self._error_payload)
 
         # Check for error in chunk - be more specific to avoid false positives
         if self._detect_error_in_chunk(chunk):
             await self._handle_stream_cleanup()
-            return chunk
+            raise StreamingCacheAborted(chunk, self._error_payload)
 
         if self.is_responses_api:
             await self._handle_responses_api(chunk)
@@ -795,6 +865,7 @@ class StreamingCacheWriter:
                     data_json = json.loads(data_part.strip())
                     if isinstance(data_json, dict) and "error" in data_json:
                         self._error_occurred = True
+                        self._error_payload = data_json
                         logger.debug(
                             "streaming_cache_writer_error_detected",
                             error=data_json.get("error"),
@@ -956,7 +1027,18 @@ class StreamingCacheWriter:
         """Intercept a stream, cache chunks, and yield them"""
         try:
             async for chunk in stream:
-                yield await self.write_and_yield(chunk)
+                try:
+                    processed_chunk = await self.write_and_yield(chunk)
+                except StreamingCacheAborted as aborted:
+                    if aborted.chunk is not None:
+                        yield aborted.chunk
+                    logger.debug(
+                        "streaming_cache_aborted",
+                        error_payload=aborted.error,
+                    )
+                    return
+                else:
+                    yield processed_chunk
         except Exception as e:
             self._error_occurred = True
             await self._handle_stream_cleanup()
