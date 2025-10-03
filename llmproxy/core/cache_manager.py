@@ -46,6 +46,160 @@ class EventAwareChunk:
         )
 
 
+class _ResponsesStreamRebuilder:
+    """Helper to rebuild responses API SSE sequences from normalized chunks."""
+
+    def __init__(self) -> None:
+        self.response_id: Optional[str] = None
+        self.output_item_ids: Dict[int, str] = {}
+        self.chunks: List[str] = []
+
+    def _ensure_response_id(self, metadata: dict) -> str:
+        candidate: Optional[str] = None
+        if isinstance(metadata, dict):
+            candidate = metadata.get("response_id") or metadata.get("id")
+
+        if isinstance(candidate, str) and candidate:
+            self.response_id = candidate
+
+        if self.response_id is None:
+            self.response_id = f"resp_{uuid.uuid4().hex[:12]}"
+
+        return self.response_id
+
+    def _append_event(self, name: str, payload: Dict[str, Any]) -> None:
+        self.chunks.append(f"event: {name}\n")
+        self.chunks.append(f"data: {json.dumps(payload)}\n")
+        self.chunks.append("\n")
+
+    def handle_created(self, metadata: dict, _: EventAwareChunk) -> None:
+        current_response_id = self._ensure_response_id(metadata)
+        created_ts = metadata.get("created", int(time.time()))
+        created_value = (
+            created_ts if isinstance(created_ts, (int, float)) else int(time.time())
+        )
+
+        response_payload: Dict[str, Any] = {
+            "id": current_response_id,
+            "object": "response",
+            "created": int(created_value),
+            "model": metadata.get("model", ""),
+            "outputs": [],
+        }
+
+        if "status" in metadata:
+            response_payload["status"] = metadata.get("status")
+
+        if "status_details" in metadata:
+            response_payload["status_details"] = metadata.get("status_details")
+
+        event_payload = {
+            "type": "response.created",
+            "response": response_payload,
+        }
+
+        self._append_event("response.created", event_payload)
+
+    def handle_output_item_added(self, metadata: dict, chunk: EventAwareChunk) -> None:
+        current_response_id = self._ensure_response_id(metadata)
+        output_index = metadata.get("output_index", 0)
+
+        stored_item_id = metadata.get("item_id")
+        if not isinstance(stored_item_id, str) or not stored_item_id:
+            stored_item_id = self.output_item_ids.get(output_index)
+
+        if not stored_item_id:
+            prefix = "msg" if chunk.data_type == "message" else "rs"
+            stored_item_id = f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+        self.output_item_ids[output_index] = stored_item_id
+
+        item_payload: Dict[str, Any] = {
+            "id": stored_item_id,
+            "type": chunk.data_type or "message",
+            "summary": metadata.get("summary", []),
+        }
+
+        if "item_status" in metadata:
+            item_payload["status"] = metadata.get("item_status")
+
+        if "item_role" in metadata:
+            item_payload["role"] = metadata.get("item_role")
+
+        if "item_name" in metadata:
+            item_payload["name"] = metadata.get("item_name")
+
+        event_payload: Dict[str, Any] = {
+            "type": "response.output_item.added",
+            "output_index": output_index,
+            "item": item_payload,
+        }
+
+        if current_response_id:
+            event_payload["response_id"] = current_response_id
+
+        self._append_event("response.output_item.added", event_payload)
+
+    def handle_output_text_delta(self, metadata: dict, chunk: EventAwareChunk) -> None:
+        event_payload: Dict[str, Any] = {
+            "type": "response.output_text.delta",
+            "output_index": metadata.get("output_index", 0),
+            "content_index": metadata.get("content_index", 0),
+            "delta": chunk.content or "",
+        }
+
+        response_id = metadata.get("response_id")
+        if isinstance(response_id, str) and response_id:
+            self._ensure_response_id(metadata)
+            event_payload["response_id"] = response_id
+
+        self._append_event("response.output_text.delta", event_payload)
+
+    def handle_completed(self, metadata: dict, _: EventAwareChunk) -> None:
+        current_response_id = self._ensure_response_id(metadata)
+        created_ts = metadata.get("created", int(time.time()))
+        created_value = (
+            created_ts if isinstance(created_ts, (int, float)) else int(time.time())
+        )
+
+        outputs: List[Dict[str, Any]] = []
+        stored_outputs = metadata.get("outputs", [])
+        if isinstance(stored_outputs, list):
+            for idx, output in enumerate(stored_outputs):
+                if not isinstance(output, dict):
+                    continue
+
+                output_copy: Dict[str, Any] = dict(output)
+                output_id = output_copy.get("id")
+                fallback_id = self.output_item_ids.get(idx)
+
+                if (not isinstance(output_id, str) or not output_id) and fallback_id:
+                    output_copy["id"] = fallback_id
+
+                outputs.append(output_copy)
+
+        response_payload: Dict[str, Any] = {
+            "id": current_response_id,
+            "object": "response",
+            "created": int(created_value),
+            "model": metadata.get("model", ""),
+            "outputs": outputs,
+        }
+
+        if "status" in metadata:
+            response_payload["status"] = metadata.get("status")
+
+        if "status_details" in metadata:
+            response_payload["status_details"] = metadata.get("status_details")
+
+        event_payload = {
+            "type": "response.completed",
+            "response": response_payload,
+        }
+
+        self._append_event("response.completed", event_payload)
+
+
 class StreamingCacheAborted(RuntimeError):
     """Raised when streaming cache must halt due to an upstream error."""
 
@@ -478,79 +632,26 @@ class CacheManager:
 
     def _reconstruct_responses_stream(self, normalized_chunks: List[dict]) -> List[str]:
         """Reconstruct responses API SSE stream from normalized chunks"""
-        reconstructed = []
+        rebuilder = _ResponsesStreamRebuilder()
 
-        # Generate new IDs for this reconstruction
-        response_id = f"resp_{uuid.uuid4().hex[:12]}"
-        message_id = f"msg_{uuid.uuid4().hex[:12]}"
+        handlers = {
+            "response.created": rebuilder.handle_created,
+            "response.output_item.added": rebuilder.handle_output_item_added,
+            "response.output_text.delta": rebuilder.handle_output_text_delta,
+            "response.completed": rebuilder.handle_completed,
+        }
 
         for chunk_data in normalized_chunks:
             chunk = EventAwareChunk.from_dict(chunk_data)
+            metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
+            event_type = chunk.event_type
+            if not isinstance(event_type, str):
+                continue
+            handler = handlers.get(event_type)
+            if handler:
+                handler(metadata, chunk)
 
-            if chunk.event_type == "response.created":
-                # Reconstruct response.created event
-                event_data = {
-                    "type": "response.created",
-                    "response": {
-                        "id": response_id,
-                        "object": "response",
-                        "created": chunk.metadata.get("created", int(time.time())),
-                        "model": chunk.metadata.get("model", ""),
-                        "outputs": [],
-                    },
-                }
-                reconstructed.append("event: response.created\n")
-                reconstructed.append(f"data: {json.dumps(event_data)}\n")
-                reconstructed.append("\n")  # Empty line between events
-
-            elif chunk.event_type == "response.output_item.added":
-                # Reconstruct output item event
-                event_data = {
-                    "type": "response.output_item.added",
-                    "output_index": chunk.metadata.get("output_index", 0),
-                    "item": {
-                        "id": (
-                            message_id
-                            if chunk.data_type == "message"
-                            else f"rs_{uuid.uuid4().hex[:12]}"
-                        ),
-                        "type": chunk.data_type or "message",
-                        "summary": chunk.metadata.get("summary", []),
-                    },
-                }
-                reconstructed.append("event: response.output_item.added\n")
-                reconstructed.append(f"data: {json.dumps(event_data)}\n")
-                reconstructed.append("\n")
-
-            elif chunk.event_type == "response.output_text.delta":
-                # Reconstruct text delta event
-                event_data = {
-                    "type": "response.output_text.delta",
-                    "output_index": chunk.metadata.get("output_index", 0),
-                    "content_index": chunk.metadata.get("content_index", 0),
-                    "delta": chunk.content or "",
-                }
-                reconstructed.append("event: response.output_text.delta\n")
-                reconstructed.append(f"data: {json.dumps(event_data)}\n")
-                reconstructed.append("\n")
-
-            elif chunk.event_type == "response.completed":
-                # Reconstruct completed event
-                event_data = {
-                    "type": "response.completed",
-                    "response": {
-                        "id": response_id,
-                        "object": "response",
-                        "created": chunk.metadata.get("created", int(time.time())),
-                        "model": chunk.metadata.get("model", ""),
-                        "outputs": chunk.metadata.get("outputs", []),
-                    },
-                }
-                reconstructed.append("event: response.completed\n")
-                reconstructed.append(f"data: {json.dumps(event_data)}\n")
-                reconstructed.append("\n")
-
-        return reconstructed
+        return rebuilder.chunks
 
     async def set_streaming_chunk(
         self, request_data: dict, chunk: str, finalize: bool = False
@@ -764,60 +865,155 @@ class StreamingCacheWriter:
         self, event_type: str, event_data: dict
     ) -> Optional[EventAwareChunk]:
         """Create EventAwareChunk based on event type and data"""
-        if event_type == "response.created":
-            return EventAwareChunk(
-                event_type=event_type,
-                data_type="response",
-                metadata={
-                    "model": event_data.get("response", {}).get("model"),
-                    "created": event_data.get("response", {}).get("created"),
-                },
-            )
+        handlers = {
+            "response.created": self._normalize_response_created,
+            "response.output_item.added": self._normalize_output_item_added,
+            "response.output_text.delta": self._normalize_output_text_delta,
+            "response.completed": self._normalize_response_completed,
+        }
 
-        elif event_type == "response.output_item.added":
-            item = event_data.get("item", {})
-            return EventAwareChunk(
-                event_type=event_type,
-                data_type=item.get("type"),
-                metadata={
-                    "output_index": event_data.get("output_index"),
-                    "summary": item.get("summary", []),
-                },
-            )
-
-        elif event_type == "response.output_text.delta":
-            return EventAwareChunk(
-                event_type=event_type,
-                data_type="text",
-                content=event_data.get("delta", ""),
-                metadata={
-                    "output_index": event_data.get("output_index", 0),
-                    "content_index": event_data.get("content_index", 0),
-                },
-            )
-
-        elif event_type == "response.completed":
-            response = event_data.get("response", {})
-            outputs = []
-            for output in response.get("outputs", []):
-                # Filter out dynamic IDs
-                cleaned_output = {
-                    "type": output.get("type"),
-                    "content": output.get("content", []),
-                }
-                outputs.append(cleaned_output)
-
-            return EventAwareChunk(
-                event_type=event_type,
-                data_type="response",
-                metadata={
-                    "model": response.get("model"),
-                    "created": response.get("created"),
-                    "outputs": outputs,
-                },
-            )
-
+        handler = handlers.get(event_type)
+        if handler:
+            return handler(event_data)
         return None
+
+    def _normalize_response_created(
+        self, event_data: dict
+    ) -> Optional[EventAwareChunk]:
+        response_payload = (
+            event_data.get("response", {}) if isinstance(event_data, dict) else {}
+        )
+
+        metadata = {
+            "model": response_payload.get("model"),
+            "created": response_payload.get("created"),
+        }
+
+        response_id = response_payload.get("id")
+        if response_id:
+            metadata["response_id"] = response_id
+
+        if "status" in response_payload:
+            metadata["status"] = response_payload.get("status")
+
+        if "status_details" in response_payload:
+            metadata["status_details"] = response_payload.get("status_details")
+
+        return EventAwareChunk(
+            event_type="response.created",
+            data_type="response",
+            metadata=metadata,
+        )
+
+    def _normalize_output_item_added(
+        self, event_data: dict
+    ) -> Optional[EventAwareChunk]:
+        item = event_data.get("item", {}) if isinstance(event_data, dict) else {}
+
+        response_id = event_data.get("response_id")
+        if not response_id:
+            response_info = event_data.get("response")
+            if isinstance(response_info, dict):
+                response_id = response_info.get("id")
+
+        metadata = {
+            "output_index": event_data.get("output_index"),
+            "summary": item.get("summary", []),
+        }
+
+        item_id = item.get("id")
+        if item_id:
+            metadata["item_id"] = item_id
+
+        if response_id:
+            metadata["response_id"] = response_id
+
+        if "status" in item:
+            metadata["item_status"] = item.get("status")
+
+        if "role" in item:
+            metadata["item_role"] = item.get("role")
+
+        if "name" in item:
+            metadata["item_name"] = item.get("name")
+
+        return EventAwareChunk(
+            event_type="response.output_item.added",
+            data_type=item.get("type"),
+            metadata=metadata,
+        )
+
+    def _normalize_output_text_delta(
+        self, event_data: dict
+    ) -> Optional[EventAwareChunk]:
+        metadata = {
+            "output_index": event_data.get("output_index", 0),
+            "content_index": event_data.get("content_index", 0),
+        }
+
+        if event_data.get("response_id"):
+            metadata["response_id"] = event_data.get("response_id")
+
+        return EventAwareChunk(
+            event_type="response.output_text.delta",
+            data_type="text",
+            content=event_data.get("delta", ""),
+            metadata=metadata,
+        )
+
+    def _normalize_response_completed(
+        self, event_data: dict
+    ) -> Optional[EventAwareChunk]:
+        response = (
+            event_data.get("response", {}) if isinstance(event_data, dict) else {}
+        )
+        outputs = []
+        for output in response.get("outputs", []):
+            if not isinstance(output, dict):
+                continue
+
+            cleaned_output = {
+                "type": output.get("type"),
+                "content": output.get("content", []),
+            }
+
+            if output.get("id"):
+                cleaned_output["id"] = output.get("id")
+
+            if "status" in output:
+                cleaned_output["status"] = output.get("status")
+
+            if "role" in output:
+                cleaned_output["role"] = output.get("role")
+
+            if "summary" in output:
+                cleaned_output["summary"] = output.get("summary")
+
+            if "metadata" in output:
+                cleaned_output["metadata"] = output.get("metadata")
+
+            outputs.append(cleaned_output)
+
+        metadata = {
+            "model": response.get("model"),
+            "created": response.get("created"),
+            "outputs": outputs,
+        }
+
+        if response.get("id"):
+            metadata["response_id"] = response.get("id")
+
+        if "status" in response:
+            metadata["status"] = response.get("status")
+
+        if "status_details" in response:
+            metadata["status_details"] = response.get("status_details")
+
+        return EventAwareChunk(
+            event_type="response.completed",
+            data_type="response",
+            metadata=metadata,
+        )
 
     def _parse_responses_event(self, chunk: str) -> Optional[EventAwareChunk]:
         """Parse a responses API SSE event and return normalized chunk"""
