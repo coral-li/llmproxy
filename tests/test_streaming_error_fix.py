@@ -102,6 +102,7 @@ async def test_responses_api_streaming_error_returns_correct_status():
         cache_manager=MagicMock(),
         llm_client=llm_client,
         config=MagicMock(),
+        response_affinity_manager=MagicMock(),
     )
 
     # Create test endpoint

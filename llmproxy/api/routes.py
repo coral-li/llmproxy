@@ -18,6 +18,7 @@ def create_router(
     cache_manager: Optional[Callable[[], CacheManager]] = None,
     llm_client: Optional[Callable[[], LLMClient]] = None,
     config: Optional[Callable[[], Any]] = None,
+    response_affinity_manager: Optional[Callable[[], Any]] = None,
 ) -> APIRouter:
     """Create FastAPI router with all LLM proxy endpoints"""
 
@@ -39,7 +40,11 @@ def create_router(
         nonlocal response_handler
         if response_handler is None:
             response_handler = _create_response_handler(
-                get_load_balancer, cache_manager, llm_client, config
+                get_load_balancer,
+                cache_manager,
+                llm_client,
+                config,
+                response_affinity_manager,
             )
         return response_handler
 
@@ -107,6 +112,7 @@ def _create_response_handler(
     cache_manager: Optional[Callable[[], CacheManager]],
     llm_client: Optional[Callable[[], LLMClient]],
     config: Optional[Callable[[], Any]],
+    response_affinity_manager: Optional[Callable[[], Any]],
 ) -> ResponseHandler:
     lb = get_load_balancer()
     if not lb:
@@ -118,9 +124,10 @@ def _create_response_handler(
     cm = cache_manager() if cache_manager is not None else None
     lc = llm_client() if llm_client is not None else None
     cfg = config() if config is not None else None
+    ram = response_affinity_manager() if response_affinity_manager is not None else None
 
     # Validate required dependencies
-    if cm is None or lc is None or cfg is None:
+    if cm is None or lc is None or cfg is None or ram is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Required dependencies not available",
@@ -131,6 +138,7 @@ def _create_response_handler(
         cache_manager=cm,
         llm_client=lc,
         config=cfg,
+        response_affinity_manager=ram,
     )
 
 
