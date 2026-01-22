@@ -1,6 +1,10 @@
+import hashlib
 import re
 
 import httpx
+import redis
+
+from llmproxy.models.endpoint import Endpoint
 
 
 def _extract_output_text(response_json: dict) -> str:
@@ -29,7 +33,7 @@ def _extract_port(output_text: str) -> str:
     return match.group(1)
 
 
-def test_encrypted_reasoning_requires_previous_response_id(proxy_url, model):
+def test_encrypted_reasoning_without_mapping_returns_conflict(proxy_url, model):
     payload = {
         "model": model,
         "input": [{"type": "reasoning", "encrypted_content": "abc123"}],
@@ -37,9 +41,9 @@ def test_encrypted_reasoning_requires_previous_response_id(proxy_url, model):
 
     response = httpx.post(f"{proxy_url}/responses", json=payload, timeout=10.0)
 
-    assert response.status_code == 400
+    assert response.status_code == 409
     detail = response.json().get("detail", "")
-    assert "Encrypted reasoning content requires previous_response_id" in detail
+    assert "Unknown encrypted reasoning content" in detail
 
 
 def test_previous_response_id_affinity(proxy_url, model):
@@ -71,3 +75,34 @@ def test_previous_response_id_affinity(proxy_url, model):
     port_2 = _extract_port(output_text_2)
 
     assert port_1 == port_2
+
+
+def test_encrypted_reasoning_affinity_mapping(proxy_url, model, llmproxy_server):
+    encrypted_content = "enc-test-1"
+    for mock_server in llmproxy_server.mock_servers:
+        mock_server.clear_error_response()
+    endpoint = Endpoint(
+        model=model,
+        weight=1,
+        params={"api_key": "test-key-1", "base_url": "http://localhost:8001"},
+    )
+    encrypted_hash = hashlib.sha256(encrypted_content.encode("utf-8")).hexdigest()
+    key = f"llmproxy:response_affinity:encrypted:{encrypted_hash}"
+
+    redis_client = redis.Redis(host="localhost", port=6379, decode_responses=True)
+    redis_client.set(key, endpoint.id)
+
+    payload = {
+        "model": model,
+        "input": [
+            {"type": "reasoning", "encrypted_content": encrypted_content},
+            {"role": "user", "content": "Hello there"},
+        ],
+        "extra_body": {"cache": {"no-cache": True}},
+    }
+
+    response = httpx.post(f"{proxy_url}/responses", json=payload, timeout=10.0)
+    assert response.status_code == 200
+    output_text = _extract_output_text(response.json())
+    port = _extract_port(output_text)
+    assert port == "8001"

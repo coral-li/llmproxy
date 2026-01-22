@@ -1,5 +1,5 @@
 import json
-from typing import Any, AsyncIterator, Dict, Optional, Union
+from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
@@ -38,7 +38,6 @@ class ResponseHandler(BaseRequestHandler):
     async def handle_request(
         self, request_data: dict
     ) -> Union[Dict[Any, Any], StreamingResponse]:
-        self._validate_stateful_request(request_data)
         return await super().handle_request(request_data)
 
     async def _make_request(
@@ -123,11 +122,10 @@ class ResponseHandler(BaseRequestHandler):
     async def _execute_with_failover(
         self, model_group: str, request_data: dict
     ) -> Union[Dict[Any, Any], StreamingResponse]:
-        previous_response_id = self._get_previous_response_id(request_data)
-        if not previous_response_id:
+        endpoint = await self._resolve_affinity_endpoint(model_group, request_data)
+        if endpoint is None:
             return await super()._execute_with_failover(model_group, request_data)
 
-        endpoint = await self._get_pinned_endpoint(model_group, previous_response_id)
         is_streaming = request_data.get("stream", False)
         last_response = None
 
@@ -161,16 +159,29 @@ class ResponseHandler(BaseRequestHandler):
 
         return last_response or self._all_endpoints_failed_response()
 
-    def _validate_stateful_request(self, request_data: dict) -> None:
+    async def _resolve_affinity_endpoint(
+        self, model_group: str, request_data: dict
+    ) -> Optional[Endpoint]:
         previous_response_id = self._get_previous_response_id(request_data)
-        if not previous_response_id and self._has_encrypted_reasoning(request_data):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Encrypted reasoning content requires previous_response_id "
-                    "for affinity routing"
-                ),
-            )
+        if previous_response_id:
+            return await self._get_pinned_endpoint(model_group, previous_response_id)
+
+        encrypted_contents = self._extract_encrypted_reasoning_inputs(request_data)
+        if not encrypted_contents:
+            return None
+
+        endpoint_id = await self._resolve_encrypted_affinity_endpoint_id(
+            encrypted_contents
+        )
+
+        for endpoint in self.load_balancer.endpoint_configs.get(model_group, []):
+            if endpoint.id == endpoint_id:
+                return endpoint
+
+        raise HTTPException(
+            status_code=409,
+            detail="Encrypted reasoning items mapped to an unavailable endpoint",
+        )
 
     def _get_previous_response_id(self, request_data: dict) -> Optional[str]:
         previous_response_id = request_data.get("previous_response_id")
@@ -201,25 +212,24 @@ class ResponseHandler(BaseRequestHandler):
             detail="previous_response_id mapped to an unavailable endpoint",
         )
 
-    def _has_encrypted_reasoning(self, request_data: dict) -> bool:
+    def _extract_encrypted_reasoning_inputs(self, request_data: dict) -> List[str]:
         input_data = request_data.get("input")
-        if input_data is None:
-            return False
-        return self._contains_encrypted_reasoning(input_data)
+        return self._collect_encrypted_reasoning(input_data)
 
-    def _contains_encrypted_reasoning(self, value: Any) -> bool:
+    def _collect_encrypted_reasoning(self, value: Any) -> List[str]:
+        encrypted_items: List[str] = []
+
         if isinstance(value, dict):
             if value.get("type") == "reasoning" and isinstance(
                 value.get("encrypted_content"), str
             ):
-                return True
+                encrypted_items.append(value["encrypted_content"])
             for nested in value.values():
-                if self._contains_encrypted_reasoning(nested):
-                    return True
-            return False
-        if isinstance(value, list):
-            return any(self._contains_encrypted_reasoning(item) for item in value)
-        return False
+                encrypted_items.extend(self._collect_encrypted_reasoning(nested))
+        elif isinstance(value, list):
+            for item in value:
+                encrypted_items.extend(self._collect_encrypted_reasoning(item))
+        return encrypted_items
 
     async def _record_affinity_from_response(
         self, response_data: Optional[dict], endpoint: Endpoint
@@ -228,6 +238,12 @@ class ResponseHandler(BaseRequestHandler):
         if response_id:
             await self.response_affinity_manager.set_endpoint_id(
                 response_id, endpoint.id
+            )
+        for encrypted_content in self._extract_encrypted_reasoning_outputs(
+            response_data
+        ):
+            await self.response_affinity_manager.set_endpoint_id_for_encrypted(
+                encrypted_content, endpoint.id
             )
 
     def _extract_response_id(self, response_data: Optional[dict]) -> Optional[str]:
@@ -250,6 +266,12 @@ class ResponseHandler(BaseRequestHandler):
                     await self.response_affinity_manager.set_endpoint_id(
                         response_id, endpoint_id
                     )
+            for encrypted_content in self._extract_encrypted_reasoning_from_stream_line(
+                line
+            ):
+                await self.response_affinity_manager.set_endpoint_id_for_encrypted(
+                    encrypted_content, endpoint_id
+                )
             yield line
 
     def _extract_response_id_from_stream_line(self, line: str) -> Optional[str]:
@@ -274,3 +296,87 @@ class ResponseHandler(BaseRequestHandler):
             if isinstance(response_id, str) and response_id:
                 return response_id
         return None
+
+    async def _resolve_encrypted_affinity_endpoint_id(
+        self, encrypted_contents: List[str]
+    ) -> str:
+        endpoint_ids = set()
+        for encrypted_content in encrypted_contents:
+            endpoint_id = (
+                await self.response_affinity_manager.get_endpoint_id_for_encrypted(
+                    encrypted_content
+                )
+            )
+            if not endpoint_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Unknown encrypted reasoning content; affinity mapping expired "
+                        "or missing"
+                    ),
+                )
+            endpoint_ids.add(endpoint_id)
+
+        if len(endpoint_ids) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Encrypted reasoning items map to different endpoints; "
+                    "cannot safely route request"
+                ),
+            )
+
+        return endpoint_ids.pop()
+
+    def _extract_encrypted_reasoning_outputs(
+        self, response_data: Optional[dict]
+    ) -> List[str]:
+        if not isinstance(response_data, dict):
+            return []
+        outputs = response_data.get("output") or response_data.get("outputs") or []
+        return self._extract_encrypted_reasoning_from_items(outputs)
+
+    def _extract_encrypted_reasoning_from_items(self, items: Any) -> List[str]:
+        encrypted_items: List[str] = []
+        if isinstance(items, dict):
+            items = [items]
+        if not isinstance(items, list):
+            return encrypted_items
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "reasoning" and isinstance(
+                item.get("encrypted_content"), str
+            ):
+                encrypted_items.append(item["encrypted_content"])
+        return encrypted_items
+
+    def _extract_encrypted_reasoning_from_stream_line(self, line: str) -> List[str]:
+        stripped = line.strip()
+        if not stripped.startswith("data: "):
+            return []
+        data = stripped[6:].strip()
+        if not data or data == "[DONE]":
+            return []
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(payload, dict):
+            return []
+
+        encrypted_items: List[str] = []
+
+        item = payload.get("item")
+        if isinstance(item, dict):
+            encrypted_items.extend(self._extract_encrypted_reasoning_from_items(item))
+
+        response = payload.get("response")
+        if isinstance(response, dict):
+            outputs = response.get("output") or response.get("outputs") or []
+            encrypted_items.extend(
+                self._extract_encrypted_reasoning_from_items(outputs)
+            )
+
+        return encrypted_items
