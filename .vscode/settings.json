@@ -15,6 +15,18 @@
         "note": "Information"
     },
 
+    // Flake8 Linter extension settings
+    "flake8.importStrategy": "fromEnvironment",
+    "flake8.args": [
+        "--config=pyproject.toml"
+    ],
+    "flake8.severity": {
+        "E": "Error",
+        "F": "Error",
+        "W": "Warning",
+        "C90": "Warning"
+    },
+
     // Enable format on save and other useful Python settings
     "editor.formatOnSave": true,
     "editor.codeActionsOnSave": {
