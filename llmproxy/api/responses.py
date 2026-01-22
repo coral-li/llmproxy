@@ -1,4 +1,5 @@
 import json
+import time
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 from fastapi import HTTPException
@@ -258,8 +259,14 @@ class ResponseHandler(BaseRequestHandler):
         self, stream: AsyncIterator[str], endpoint_id: str
     ) -> AsyncIterator[str]:
         response_id: Optional[str] = None
+        current_event: Optional[str] = None
 
         async for line in stream:
+            if line.startswith("event: "):
+                current_event = line[7:].strip()
+
+            line = self._ensure_created_at_in_stream_line(line, current_event)
+
             if response_id is None:
                 response_id = self._extract_response_id_from_stream_line(line)
                 if response_id:
@@ -272,7 +279,60 @@ class ResponseHandler(BaseRequestHandler):
                 await self.response_affinity_manager.set_endpoint_id_for_encrypted(
                     encrypted_content, endpoint_id
                 )
+
+            if line.strip() == "":
+                current_event = None
             yield line
+
+    def _ensure_created_at_in_stream_line(
+        self, line: str, current_event: Optional[str]
+    ) -> str:
+        if not line.startswith("data: "):
+            return line
+
+        data = line[6:].strip()
+        if not data or data == "[DONE]":
+            return line
+
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            return line
+
+        if not isinstance(payload, dict):
+            return line
+
+        event_type = payload.get("type")
+        if current_event != "response.created" and event_type != "response.created":
+            return line
+
+        response = payload.get("response")
+        if not isinstance(response, dict):
+            return line
+
+        created_at = response.get("created_at")
+        if created_at is not None:
+            return line
+
+        created_at_value = self._coerce_timestamp(response.get("created"))
+        if created_at_value is None:
+            created_at_value = int(time.time())
+
+        response["created_at"] = created_at_value
+        payload["response"] = response
+
+        suffix = "\n" if line.endswith("\n") else ""
+        return f"data: {json.dumps(payload)}{suffix}"
+
+    def _coerce_timestamp(self, value: Any) -> Optional[int]:
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str) and value.strip():
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return None
+        return None
 
     def _extract_response_id_from_stream_line(self, line: str) -> Optional[str]:
         stripped = line.strip()

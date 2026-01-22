@@ -74,7 +74,9 @@ class _ResponsesStreamRebuilder:
 
     def handle_created(self, metadata: dict, _: EventAwareChunk) -> None:
         current_response_id = self._ensure_response_id(metadata)
-        created_ts = metadata.get("created", int(time.time()))
+        created_ts = metadata.get("created_at")
+        if created_ts is None:
+            created_ts = metadata.get("created", int(time.time()))
         created_value = (
             created_ts if isinstance(created_ts, (int, float)) else int(time.time())
         )
@@ -82,10 +84,13 @@ class _ResponsesStreamRebuilder:
         response_payload: Dict[str, Any] = {
             "id": current_response_id,
             "object": "response",
-            "created": int(created_value),
+            "created_at": int(created_value),
             "model": metadata.get("model", ""),
             "outputs": [],
         }
+
+        if "created" in metadata:
+            response_payload["created"] = metadata.get("created")
 
         if "status" in metadata:
             response_payload["status"] = metadata.get("status")
@@ -157,7 +162,9 @@ class _ResponsesStreamRebuilder:
 
     def handle_completed(self, metadata: dict, _: EventAwareChunk) -> None:
         current_response_id = self._ensure_response_id(metadata)
-        created_ts = metadata.get("created", int(time.time()))
+        created_ts = metadata.get("created_at")
+        if created_ts is None:
+            created_ts = metadata.get("created", int(time.time()))
         created_value = (
             created_ts if isinstance(created_ts, (int, float)) else int(time.time())
         )
@@ -181,10 +188,13 @@ class _ResponsesStreamRebuilder:
         response_payload: Dict[str, Any] = {
             "id": current_response_id,
             "object": "response",
-            "created": int(created_value),
+            "created_at": int(created_value),
             "model": metadata.get("model", ""),
             "outputs": outputs,
         }
+
+        if "created" in metadata:
+            response_payload["created"] = metadata.get("created")
 
         if "status" in metadata:
             response_payload["status"] = metadata.get("status")
@@ -877,17 +887,30 @@ class StreamingCacheWriter:
             return handler(event_data)
         return None
 
+    def _extract_created_metadata(
+        self, response_payload: dict
+    ) -> Tuple[Optional[Any], Optional[Any]]:
+        created_at = response_payload.get("created_at")
+        created = response_payload.get("created")
+        if created_at is None:
+            created_at = created
+        return created_at, created
+
     def _normalize_response_created(
         self, event_data: dict
     ) -> Optional[EventAwareChunk]:
         response_payload = (
             event_data.get("response", {}) if isinstance(event_data, dict) else {}
         )
+        created_at, created = self._extract_created_metadata(response_payload)
 
         metadata = {
             "model": response_payload.get("model"),
-            "created": response_payload.get("created"),
+            "created_at": created_at,
         }
+
+        if created is not None:
+            metadata["created"] = created
 
         response_id = response_payload.get("id")
         if response_id:
@@ -967,8 +990,39 @@ class StreamingCacheWriter:
         response = (
             event_data.get("response", {}) if isinstance(event_data, dict) else {}
         )
-        outputs = []
-        for output in response.get("outputs", []):
+        created_at, created = self._extract_created_metadata(response)
+        outputs = self._clean_completed_outputs(response.get("outputs", []))
+
+        metadata = {
+            "model": response.get("model"),
+            "created_at": created_at,
+            "outputs": outputs,
+        }
+
+        if created is not None:
+            metadata["created"] = created
+
+        if response.get("id"):
+            metadata["response_id"] = response.get("id")
+
+        if "status" in response:
+            metadata["status"] = response.get("status")
+
+        if "status_details" in response:
+            metadata["status_details"] = response.get("status_details")
+
+        return EventAwareChunk(
+            event_type="response.completed",
+            data_type="response",
+            metadata=metadata,
+        )
+
+    def _clean_completed_outputs(self, outputs: Any) -> List[dict]:
+        cleaned_outputs: List[dict] = []
+        if not isinstance(outputs, list):
+            return cleaned_outputs
+
+        for output in outputs:
             if not isinstance(output, dict):
                 continue
 
@@ -992,28 +1046,9 @@ class StreamingCacheWriter:
             if "metadata" in output:
                 cleaned_output["metadata"] = output.get("metadata")
 
-            outputs.append(cleaned_output)
+            cleaned_outputs.append(cleaned_output)
 
-        metadata = {
-            "model": response.get("model"),
-            "created": response.get("created"),
-            "outputs": outputs,
-        }
-
-        if response.get("id"):
-            metadata["response_id"] = response.get("id")
-
-        if "status" in response:
-            metadata["status"] = response.get("status")
-
-        if "status_details" in response:
-            metadata["status_details"] = response.get("status_details")
-
-        return EventAwareChunk(
-            event_type="response.completed",
-            data_type="response",
-            metadata=metadata,
-        )
+        return cleaned_outputs
 
     def _parse_responses_event(self, chunk: str) -> Optional[EventAwareChunk]:
         """Parse a responses API SSE event and return normalized chunk"""
