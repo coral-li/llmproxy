@@ -49,6 +49,9 @@ instance is launched if one is not already running.
   ```
 - Tests automatically start mock LLM endpoints and the proxy, so no manual setup is required.
 
+## Raising PRs
+Before raising a PR, you must run the full test suite using `make test`. Use the gh cli to raise the PR.
+
 ## Useful Tips
 - The `/cache` endpoint can be used during development to clear cached entries.
 - Logs use `structlog` and are configured in `llmproxy/core/logger.py`.
