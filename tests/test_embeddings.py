@@ -3,14 +3,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from llmproxy.api.embeddings import EmbeddingHandler
-from llmproxy.config.config_loader import load_config
+from llmproxy.config.config_loader import load_config_async
 from llmproxy.core.cache_manager import CacheManager
 from llmproxy.models.endpoint import Endpoint
 
 
 @pytest.fixture
-def mock_config():
-    return load_config("test-config.yaml")
+async def mock_config():
+    return await load_config_async("test-config.yaml")
 
 
 @pytest.fixture

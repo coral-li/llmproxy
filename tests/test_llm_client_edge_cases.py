@@ -342,34 +342,36 @@ class TestLLMClientEdgeCases:
     async def test_concurrent_requests_resource_cleanup(self, client):
         """Test that concurrent requests properly clean up resources"""
 
-        async def slow_request():
-            with patch.object(
-                client.client, "post", new_callable=AsyncMock
-            ) as mock_post:
-                # Simulate slow response
-                await asyncio.sleep(0.1)
-                mock_response = MagicMock()
-                mock_response.status_code = 200
-                mock_response.json.return_value = {"choices": []}
-                mock_response.headers = {}
-                mock_post.return_value = mock_response
+        async def post_response(*_args, **_kwargs):
+            # Simulate slow response
+            await asyncio.sleep(0.1)
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {"choices": []}
+            mock_response.headers = {}
+            return mock_response
 
-                endpoint = Endpoint(
-                    model="gpt-3.5-turbo",
-                    weight=1,
-                    params={
-                        "api_key": "test-key",
-                        "base_url": "https://api.openai.com",
-                    },
-                )
+        endpoint = Endpoint(
+            model="gpt-3.5-turbo",
+            weight=1,
+            params={
+                "api_key": "test-key",
+                "base_url": "https://api.openai.com",
+            },
+        )
+
+        with patch.object(client.client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.side_effect = post_response
+
+            async def slow_request():
                 return await client.create_chat_completion(
                     endpoint=endpoint,
                     request_data={"messages": []},
                 )
 
-        # Run multiple concurrent requests
-        tasks = [slow_request() for _ in range(5)]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Run multiple concurrent requests
+            tasks = [slow_request() for _ in range(5)]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # All should complete without exceptions
         for result in results:
