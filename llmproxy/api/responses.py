@@ -324,7 +324,7 @@ class ResponseHandler(BaseRequestHandler):
         response["created_at"] = created_at_value
         payload["response"] = response
 
-        suffix = "\n" if line.endswith("\n") else ""
+        suffix = line[len(line.rstrip("\r\n")) :]
         return f"data: {json.dumps(payload)}{suffix}"
 
     def _coerce_timestamp(self, value: Any) -> Optional[int]:
