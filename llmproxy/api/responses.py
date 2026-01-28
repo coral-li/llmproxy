@@ -165,6 +165,9 @@ class ResponseHandler(BaseRequestHandler):
     ) -> Optional[Endpoint]:
         previous_response_id = self._get_previous_response_id(request_data)
         if previous_response_id:
+            # Intentionally treat previous_response_id as authoritative for routing; any
+            # encrypted reasoning inputs are assumed to belong to that response and are
+            # not revalidated here to avoid rejecting legitimate stateful follow-ups.
             return await self._get_pinned_endpoint(model_group, previous_response_id)
 
         encrypted_contents = self._extract_encrypted_reasoning_inputs(request_data)
