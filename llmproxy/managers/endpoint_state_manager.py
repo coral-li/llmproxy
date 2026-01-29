@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from datetime import datetime, timedelta
-from typing import Any, Awaitable, Dict, List, Optional, Tuple, cast
+from typing import Any, Awaitable, Dict, List, Optional, Tuple, TypeVar, Union, cast
 
 import redis.asyncio as redis
 
@@ -11,6 +12,7 @@ from llmproxy.core.logger import get_logger
 from llmproxy.models.endpoint import Endpoint
 
 logger = get_logger(__name__)
+_T = TypeVar("_T")
 
 _RECORD_OUTCOME_LUA = """
 local key = KEYS[1]
@@ -135,6 +137,11 @@ class EndpointStateManager:
         self.state_ttl = state_ttl  # How long to keep endpoint state in Redis
         self._record_outcome_sha: Optional[str] = None
         self._mark_healthy_sha: Optional[str] = None
+
+    async def _await_redis(self, result: Union[Awaitable[_T], _T]) -> _T:
+        if inspect.isawaitable(result):
+            return await cast(Awaitable[_T], result)
+        return cast(_T, result)
 
     async def _script_load(self, script: str) -> str:
         load_result = self.redis.script_load(script)
@@ -645,8 +652,8 @@ class EndpointStateManager:
         """Register an endpoint as part of a model group"""
         try:
             key = self._get_model_group_key(model_group)
-            await self.redis.sadd(key, endpoint_id)
-            await self.redis.expire(key, self.state_ttl)
+            await self._await_redis(self.redis.sadd(key, endpoint_id))
+            await self._await_redis(self.redis.expire(key, self.state_ttl))
 
             logger.debug(
                 "endpoint_registered_in_group",
@@ -666,7 +673,7 @@ class EndpointStateManager:
         """Get all endpoint IDs for a model group"""
         try:
             key = self._get_model_group_key(model_group)
-            endpoint_ids = await self.redis.smembers(key)
+            endpoint_ids = await self._await_redis(self.redis.smembers(key))
             return list(endpoint_ids) if endpoint_ids else []
 
         except Exception as e:

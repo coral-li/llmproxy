@@ -29,10 +29,9 @@ repos:
 
   - repo: local
     hooks:
-      - id: mypy
-        name: mypy
-        entry: mypy
+      - id: type-check
+        name: type-check (mypy)
+        entry: bash -c 'source .venv/bin/activate && mypy llmproxy'
         language: system
-        types: [python]
         files: ^llmproxy/
-        exclude: ^(tests/|setup.py)
+        pass_filenames: false
