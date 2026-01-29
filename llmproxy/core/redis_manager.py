@@ -1,11 +1,17 @@
 import inspect
-from typing import Optional, Union
+from typing import Any, Awaitable, Optional, Union
 
 import redis.asyncio as redis
 
 from .logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _ensure_awaitable(value: object, error_label: str) -> Awaitable[Any]:
+    if not inspect.isawaitable(value):
+        raise TypeError(error_label)
+    return value
 
 
 class RedisManager:
@@ -27,39 +33,38 @@ class RedisManager:
         self.client: Optional[redis.Redis] = None
         self._pool: Optional[redis.ConnectionPool] = None
 
+    def _build_pool(self) -> redis.ConnectionPool:
+        pool_kwargs: dict[str, Any] = {
+            "host": self.host,
+            "port": self.port,
+            "password": self.password,
+            "decode_responses": True,
+            "max_connections": 50,
+        }
+
+        if self.ssl_enabled:
+            ssl_cert_reqs = self.ssl_cert_reqs.lower() if self.ssl_cert_reqs else None
+            return redis.ConnectionPool(
+                **pool_kwargs,
+                connection_class=redis.SSLConnection,
+                ssl_cert_reqs=ssl_cert_reqs,
+            )
+
+        return redis.ConnectionPool(**pool_kwargs)
+
     async def connect(self) -> None:
         """Initialize Redis connection with connection pooling"""
+        if self.client is not None:
+            return
         try:
-            # Initialize the connection pool based on SSL usage
-            if self.ssl_enabled:
-                # Create SSL connection pool
-                ssl_cert_reqs = (
-                    self.ssl_cert_reqs.lower() if self.ssl_cert_reqs else None
-                )
-                self._pool = redis.ConnectionPool(
-                    host=self.host,
-                    port=self.port,
-                    password=self.password,
-                    connection_class=redis.SSLConnection,
-                    ssl_cert_reqs=ssl_cert_reqs,
-                    decode_responses=True,
-                    max_connections=50,
-                )
-            else:
-                # Create standard connection pool
-                self._pool = redis.ConnectionPool(
-                    host=self.host,
-                    port=self.port,
-                    password=self.password,
-                    decode_responses=True,
-                    max_connections=50,
-                )
-
+            self._pool = self._build_pool()
             self.client = redis.Redis(connection_pool=self._pool)
 
             # Test connection
             assert self.client is not None  # mypy: Redis constructor cannot return None
-            await self.client.ping()
+            await _ensure_awaitable(
+                self.client.ping(), "redis_client_ping_not_awaitable"
+            )
             logger.info(
                 "redis_connected", host=self.host, port=self.port, ssl=self.ssl_enabled
             )
@@ -73,25 +78,25 @@ class RedisManager:
         if self.client:
             # Why check isawaitable: redis-py has varied sync/async APIs across versions.
             # We fail fast if these are not coroutines to avoid silently skipping cleanup.
-            _client_close = self.client.aclose()
-            assert inspect.isawaitable(
-                _client_close
-            ), "redis_client_aclose_not_awaitable"
-            await _client_close
+            await _ensure_awaitable(
+                self.client.aclose(), "redis_client_aclose_not_awaitable"
+            )
             if self._pool:
                 # Same rationale as above: assert awaitable to catch version drift early.
-                _pool_disconnect = self._pool.disconnect()
-                assert inspect.isawaitable(
-                    _pool_disconnect
-                ), "redis_pool_disconnect_not_awaitable"
-                await _pool_disconnect
+                await _ensure_awaitable(
+                    self._pool.disconnect(), "redis_pool_disconnect_not_awaitable"
+                )
             logger.info("redis_disconnected")
+            self.client = None
+            self._pool = None
 
     async def health_check(self) -> bool:
         """Check if Redis is healthy"""
         try:
             if self.client is not None:
-                await self.client.ping()
+                await _ensure_awaitable(
+                    self.client.ping(), "redis_client_ping_not_awaitable"
+                )
                 return True
             return False
         except Exception as e:

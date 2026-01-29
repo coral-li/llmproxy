@@ -1,6 +1,7 @@
 import json
 import time
-from typing import AsyncContextManager, AsyncIterator, Optional, Union
+from collections.abc import Mapping
+from typing import Any, AsyncContextManager, AsyncIterator, Optional, Union
 from urllib.parse import urljoin
 
 import httpx
@@ -253,12 +254,21 @@ class LLMClient:
         request_duration_ms: float,
     ) -> dict:
         error = response.text
+        raw_headers: Any = response.headers
+        if isinstance(raw_headers, Mapping):
+            response_headers = dict(raw_headers)
+        else:
+            logger.debug(
+                "llm_response_headers_unexpected_type",
+                header_type=type(raw_headers).__name__,
+            )
+            response_headers = {}
         error_details = {
             "status_code": response.status_code,
             "url": url,
             "method": "POST",
             "duration_ms": request_duration_ms,
-            "response_headers": dict(response.headers),
+            "response_headers": response_headers,
             "error_size": len(error) if error else 0,
             "request_model": data.get("model") if data else None,
             "request_size": len(json.dumps(data)) if data else 0,

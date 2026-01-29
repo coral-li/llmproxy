@@ -62,12 +62,13 @@ def test_parse_responses_event_preserves_ids():
 
     created_chunk = (
         "event: response.created\n"
-        'data: {"type": "response.created", "response": {"id": "resp_original", "model": "gpt-4", "created": 1700000000, "status": "in_progress"}}\n'
+        'data: {"type": "response.created", "response": {"id": "resp_original", "model": "gpt-4", "created_at": 1700000000, "status": "in_progress"}}\n'
         "\n"
     )
     created = writer._parse_responses_event(created_chunk)
     assert created is not None
     assert created.metadata.get("response_id") == "resp_original"
+    assert created.metadata.get("created_at") == 1700000000
 
     item_chunk = (
         "event: response.output_item.added\n"
@@ -81,7 +82,7 @@ def test_parse_responses_event_preserves_ids():
 
     completed_chunk = (
         "event: response.completed\n"
-        'data: {"type": "response.completed", "response": {"id": "resp_original", "model": "gpt-4", "created": 1700000005, "status": "completed", "outputs": [{"id": "msg_original", "type": "message", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": "Hello"}]}]}}\n'
+        'data: {"type": "response.completed", "response": {"id": "resp_original", "model": "gpt-4", "created_at": 1700000005, "status": "completed", "outputs": [{"id": "msg_original", "type": "message", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": "Hello"}]}]}}\n'
         "\n"
     )
     completed = writer._parse_responses_event(completed_chunk)
@@ -90,6 +91,7 @@ def test_parse_responses_event_preserves_ids():
     outputs = completed.metadata.get("outputs")
     assert isinstance(outputs, list)
     assert outputs and outputs[0].get("id") == "msg_original"
+    assert completed.metadata.get("created_at") == 1700000005
 
 
 def test_reconstruct_responses_stream_uses_cached_ids():
@@ -160,6 +162,7 @@ def test_reconstruct_responses_stream_uses_cached_ids():
         ev for ev in data_events if ev.get("type") == "response.created"
     )
     assert created_event["response"]["id"] == "resp_original"
+    assert created_event["response"]["created_at"] == 1700000000
 
     output_added_event = next(
         ev for ev in data_events if ev.get("type") == "response.output_item.added"
@@ -170,5 +173,24 @@ def test_reconstruct_responses_stream_uses_cached_ids():
         ev for ev in data_events if ev.get("type") == "response.completed"
     )
     assert completed_event["response"]["id"] == "resp_original"
+    assert completed_event["response"]["created_at"] == 1700000005
     outputs = completed_event["response"].get("outputs", [])
     assert outputs and outputs[0].get("id") == "msg_original"
+
+
+def test_completed_outputs_preserve_encrypted_content():
+    """Completed outputs should preserve encrypted reasoning content for cache replay."""
+    cache_manager = CacheManager(redis.Redis(), cache_enabled=False)
+    writer = StreamingCacheWriter(cache_manager, {}, is_responses_api=True)
+
+    outputs = [
+        {
+            "id": "rs_1",
+            "type": "reasoning",
+            "encrypted_content": "enc-abc",
+            "content": [],
+        }
+    ]
+
+    cleaned = writer._clean_completed_outputs(outputs)
+    assert cleaned[0].get("encrypted_content") == "enc-abc"

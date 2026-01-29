@@ -68,3 +68,6 @@ general_settings:
     host: os.environ/REDIS_HOST
     port: os.environ/REDIS_PORT
     password: os.environ/REDIS_PASSWORD
+
+  # Responses API affinity mapping TTL (seconds)
+  response_affinity_ttl: 21600 # 6 hours

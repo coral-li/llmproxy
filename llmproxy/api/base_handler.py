@@ -235,6 +235,7 @@ class BaseRequestHandler(ABC):
                     response["endpoint_base_url"] = endpoint.params.get(
                         "base_url", "https://api.openai.com"
                     )
+                    response["endpoint_id"] = endpoint.id
                     return response
                 last_response = await self._handle_error_response(
                     endpoint, response, request_data, model_group, attempt, is_streaming

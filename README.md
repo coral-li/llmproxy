@@ -115,6 +115,27 @@ for event in response:
 
 Disable caching per-request by passing `extra_body={"cache": {"no-cache": True}}`.
 
+### Responses API Stateful Affinity (previous_response_id + encrypted reasoning)
+
+Stateful Responses API flows require routing consistency. LLMProxy enforces
+**endpoint affinity** for:
+
+- `previous_response_id` chains
+- encrypted reasoning items (`include: ["reasoning.encrypted_content"]`)
+
+How it works:
+
+- **`previous_response_id`**: LLMProxy stores `response_id → endpoint_id` for 6 hours
+  and routes follow-up requests to the same upstream.
+- **Encrypted reasoning**: LLMProxy hashes each `encrypted_content` blob from
+  Responses API outputs and maps `hash → endpoint_id`. When a request includes
+  encrypted reasoning items, all of them must resolve to the same endpoint or
+  LLMProxy returns `409`.
+
+If an affinity mapping is missing or expired, LLMProxy returns `409` to avoid
+silently losing context. This is intentional: you should retry with a valid
+`previous_response_id` or a current encrypted reasoning payload.
+
 ### Embeddings
 
 ```python
@@ -140,6 +161,8 @@ vector = embeddings.data[0].embedding
 - Redis-backed endpoint state shared across processes via `EndpointStateManager`.
 - Tunable retry/cooldown thresholds (`allowed_fails`, `cooldown_time`, `num_retries`).
 - Optional dedicated cache namespace and TTL overrides.
+- `response_affinity_ttl`: TTL (seconds) for response/encrypted reasoning affinity
+  mappings (default `21600` = 6 hours).
 
 The async loader in `llmproxy/config/config_loader.py` resolves `os.environ/VAR` references and merges missing cache fields from general Redis settings.
 

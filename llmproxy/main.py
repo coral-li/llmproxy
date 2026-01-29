@@ -17,6 +17,7 @@ from llmproxy.core.cache_manager import CacheManager
 from llmproxy.core.exceptions import LLMProxyError
 from llmproxy.core.logger import get_logger, setup_logging
 from llmproxy.core.redis_manager import RedisManager
+from llmproxy.core.response_affinity import ResponseAffinityManager
 from llmproxy.managers.endpoint_state_manager import EndpointStateManager
 from llmproxy.managers.load_balancer import LoadBalancer
 
@@ -28,6 +29,7 @@ redis_manager: Optional[RedisManager] = None
 cache_manager: Optional[CacheManager] = None
 llm_client: Optional[LLMClient] = None
 endpoint_state_manager: Optional[EndpointStateManager] = None
+response_affinity_manager: Optional[ResponseAffinityManager] = None
 config: Optional[Any] = None
 
 
@@ -69,7 +71,7 @@ async def init_redis(config: Any) -> Tuple[RedisManager, EndpointStateManager]:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan manager."""
-    global load_balancer, redis_manager, cache_manager, llm_client, endpoint_state_manager, config
+    global load_balancer, redis_manager, cache_manager, llm_client, endpoint_state_manager, response_affinity_manager, config
 
     # Startup
     logger.info("application_startup")
@@ -97,6 +99,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             cache_enabled=config.general_settings.cache,
         )
         logger.info("cache_manager_initialized")
+
+        # Initialize response affinity manager (for Responses API stateful routing)
+        response_affinity_manager = ResponseAffinityManager(
+            redis_client=redis_manager.get_client(),
+            ttl_seconds=config.general_settings.response_affinity_ttl,
+        )
+        logger.info(
+            "response_affinity_manager_initialized",
+            ttl_seconds=config.general_settings.response_affinity_ttl,
+        )
 
         # Initialize LLM client
         llm_client = LLMClient(
@@ -296,6 +308,15 @@ def get_config_required() -> Any:
     return config
 
 
+def get_response_affinity_manager_required() -> ResponseAffinityManager:
+    """Get response affinity manager with validation."""
+    if response_affinity_manager is None:
+        raise HTTPException(
+            status_code=503, detail="Response affinity manager not initialized"
+        )
+    return response_affinity_manager
+
+
 # Include all API routes without prefix (OpenAI compatible)
 app.include_router(
     create_router(
@@ -303,6 +324,7 @@ app.include_router(
         cache_manager=get_cache_manager_required,
         llm_client=get_llm_client_required,
         config=get_config_required,
+        response_affinity_manager=get_response_affinity_manager_required,
     )
 )
 
@@ -325,6 +347,11 @@ def get_llm_client() -> Optional[LLMClient]:
 def get_config() -> Any:
     """Dependency injection for config."""
     return config
+
+
+def get_response_affinity_manager() -> Optional[ResponseAffinityManager]:
+    """Dependency injection for response affinity manager."""
+    return response_affinity_manager
 
 
 def main() -> None:

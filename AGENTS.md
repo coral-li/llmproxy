@@ -16,13 +16,23 @@ This document provides development tips and project conventions for working on t
 - `tests/` – pytest suite. Tests spin up mock servers and the proxy automatically.
 - `Makefile` – helper tasks for formatting, linting and running tests.
 
-## Development Workflow
-Use the Makefile or pre-commit to run checks before opening a pull request.
+## Code Quality
 
-```bash
-make pre-commit  # format, lint and type check
-make test        # run the pytest suite
-```
+- You MUST always write the highest quality code
+- You MUST follow the DRY principle
+- You MUST ALWAYS keep the code nicely structured, elegant and readable
+- You MUST ALWAYS keep functions nice and don't let them become too long
+- You MUST ALWAYS always follow the latest best practices for high-performance, security and maintainability
+- You WILL refactor code that becomes too messy or complicated to make it more maintainable and elegant
+
+## Context7
+
+When working with libraries, frameworks, or APIs, ALWAYS proactively use the context7 MCP tools (`resolve-library-id` then `query-docs`) to fetch up-to-date documentation. Do this automatically without waiting for the user to ask. This ensures you have the latest API information rather than relying on potentially outdated training data.
+
+## Mandatory Coding Process
+
+- When the user asks you to implement a code change, don't start implementing immediately. First analyze the relevant sections of the code and determine the best course of action to achieve the goal the user has communicated. If there are decisions to be made, ask the user one question at a time as multiple choice questions and wait for this response before moving to the next question. Include the relevant context that will help the user make a decision. Also include your recommendation and explain why you are recommending this option. Then present the plan to the user for approval. Once approved, start implementing.
+- After making changes to the code, before reporting success back to the developer, you must run `make pre-commit` and `make test` and iteratively fix all issues.
 
 The tests start mock endpoints and the proxy automatically. A temporary Redis
 instance is launched if one is not already running.
@@ -48,6 +58,9 @@ instance is launched if one is not already running.
   make test
   ```
 - Tests automatically start mock LLM endpoints and the proxy, so no manual setup is required.
+
+## Raising PRs
+Before raising a PR, you must run the full test suite using `make test`. Use the gh cli to raise the PR.
 
 ## Useful Tips
 - The `/cache` endpoint can be used during development to clear cached entries.

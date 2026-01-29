@@ -58,6 +58,7 @@ class GeneralSettings(BaseModel):
     redis_ssl_cert_reqs: Optional[str] = None  # Options: "required", "optional", "none"
     cache: bool = True
     cache_params: Optional[CacheParams] = None
+    response_affinity_ttl: int = Field(default=21600, gt=0)
 
 
 class LLMProxyConfig(BaseModel):

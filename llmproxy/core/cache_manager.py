@@ -2,11 +2,20 @@ import hashlib
 import json
 import time
 import uuid
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
+from typing import (
+    Any,
+    AsyncIterator,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import redis.asyncio as redis
 
 from .logger import get_logger
+from .redis_utils import await_redis_result
 
 logger = get_logger(__name__)
 
@@ -74,7 +83,9 @@ class _ResponsesStreamRebuilder:
 
     def handle_created(self, metadata: dict, _: EventAwareChunk) -> None:
         current_response_id = self._ensure_response_id(metadata)
-        created_ts = metadata.get("created", int(time.time()))
+        created_ts = metadata.get("created_at")
+        if created_ts is None:
+            created_ts = metadata.get("created", int(time.time()))
         created_value = (
             created_ts if isinstance(created_ts, (int, float)) else int(time.time())
         )
@@ -82,10 +93,13 @@ class _ResponsesStreamRebuilder:
         response_payload: Dict[str, Any] = {
             "id": current_response_id,
             "object": "response",
-            "created": int(created_value),
+            "created_at": int(created_value),
             "model": metadata.get("model", ""),
             "outputs": [],
         }
+
+        if "created" in metadata:
+            response_payload["created"] = metadata.get("created")
 
         if "status" in metadata:
             response_payload["status"] = metadata.get("status")
@@ -157,7 +171,9 @@ class _ResponsesStreamRebuilder:
 
     def handle_completed(self, metadata: dict, _: EventAwareChunk) -> None:
         current_response_id = self._ensure_response_id(metadata)
-        created_ts = metadata.get("created", int(time.time()))
+        created_ts = metadata.get("created_at")
+        if created_ts is None:
+            created_ts = metadata.get("created", int(time.time()))
         created_value = (
             created_ts if isinstance(created_ts, (int, float)) else int(time.time())
         )
@@ -181,10 +197,13 @@ class _ResponsesStreamRebuilder:
         response_payload: Dict[str, Any] = {
             "id": current_response_id,
             "object": "response",
-            "created": int(created_value),
+            "created_at": int(created_value),
             "model": metadata.get("model", ""),
             "outputs": outputs,
         }
+
+        if "created" in metadata:
+            response_payload["created"] = metadata.get("created")
 
         if "status" in metadata:
             response_payload["status"] = metadata.get("status")
@@ -237,6 +256,44 @@ class CacheManager:
         key = f"{self.namespace}:{cache_hash}"
 
         return key
+
+    def _affinity_key(self, request_data: dict) -> str:
+        """Generate cache key for affinity metadata."""
+        return f"{self._generate_cache_key(request_data)}:affinity"
+
+    async def set_affinity(self, request_data: dict, endpoint_id: str) -> None:
+        """Cache endpoint affinity metadata for a request."""
+        if not endpoint_id or not self._should_cache(request_data):
+            return
+
+        key = self._affinity_key(request_data)
+        try:
+            if self.ttl and self.ttl > 0:
+                await self.redis.setex(key, self.ttl, endpoint_id)
+            else:
+                await self.redis.set(key, endpoint_id)
+            logger.debug("cache_affinity_set", key=key, endpoint_id=endpoint_id)
+        except Exception as e:
+            logger.error("cache_affinity_set_error", error=str(e), key=key)
+
+    async def get_affinity(self, request_data: dict) -> Optional[str]:
+        """Get cached endpoint affinity metadata for a request."""
+        if not self._should_cache(request_data):
+            return None
+
+        key = self._affinity_key(request_data)
+        try:
+            data = await self.redis.get(key)
+            if data is None:
+                return None
+            if isinstance(data, bytes):
+                return data.decode("utf-8")
+            if isinstance(data, str):
+                return data
+            return str(data)
+        except Exception as e:
+            logger.error("cache_affinity_get_error", error=str(e), key=key)
+            return None
 
     def _should_cache(self, request_data: dict) -> bool:
         """Determine if request should be cached"""
@@ -607,7 +664,7 @@ class CacheManager:
                     return reconstructed_chunks
             else:
                 # For chat completions, use the existing raw chunk approach
-                chunks = await self.redis.lrange(key, 0, -1)  # type: ignore
+                chunks = await await_redis_result(self.redis.lrange(key, 0, -1))
                 if chunks:
                     self._streaming_hits += 1
                     logger.info(
@@ -778,7 +835,9 @@ class StreamingCacheWriter:
             return
 
         try:
-            await self.cache_manager.redis.delete(self._error_sentinel_key())
+            await await_redis_result(
+                self.cache_manager.redis.delete(self._error_sentinel_key())
+            )
             logger.debug(
                 "streaming_cache_sentinel_cleared",
                 key=self._error_sentinel_key(),
@@ -818,7 +877,7 @@ class StreamingCacheWriter:
             cleanup_keys.append(f"{cleanup_keys[0]}:normalized")
 
         try:
-            await self.cache_manager.redis.delete(*cleanup_keys)
+            await await_redis_result(self.cache_manager.redis.delete(*cleanup_keys))
             logger.debug(
                 "streaming_cache_cleanup",
                 keys=cleanup_keys,
@@ -877,17 +936,30 @@ class StreamingCacheWriter:
             return handler(event_data)
         return None
 
+    def _extract_created_metadata(
+        self, response_payload: dict
+    ) -> Tuple[Optional[Any], Optional[Any]]:
+        created_at = response_payload.get("created_at")
+        created = response_payload.get("created")
+        if created_at is None:
+            created_at = created
+        return created_at, created
+
     def _normalize_response_created(
         self, event_data: dict
     ) -> Optional[EventAwareChunk]:
         response_payload = (
             event_data.get("response", {}) if isinstance(event_data, dict) else {}
         )
+        created_at, created = self._extract_created_metadata(response_payload)
 
         metadata = {
             "model": response_payload.get("model"),
-            "created": response_payload.get("created"),
+            "created_at": created_at,
         }
+
+        if created is not None:
+            metadata["created"] = created
 
         response_id = response_payload.get("id")
         if response_id:
@@ -967,8 +1039,39 @@ class StreamingCacheWriter:
         response = (
             event_data.get("response", {}) if isinstance(event_data, dict) else {}
         )
-        outputs = []
-        for output in response.get("outputs", []):
+        created_at, created = self._extract_created_metadata(response)
+        outputs = self._clean_completed_outputs(response.get("outputs", []))
+
+        metadata = {
+            "model": response.get("model"),
+            "created_at": created_at,
+            "outputs": outputs,
+        }
+
+        if created is not None:
+            metadata["created"] = created
+
+        if response.get("id"):
+            metadata["response_id"] = response.get("id")
+
+        if "status" in response:
+            metadata["status"] = response.get("status")
+
+        if "status_details" in response:
+            metadata["status_details"] = response.get("status_details")
+
+        return EventAwareChunk(
+            event_type="response.completed",
+            data_type="response",
+            metadata=metadata,
+        )
+
+    def _clean_completed_outputs(self, outputs: Any) -> List[dict]:
+        cleaned_outputs: List[dict] = []
+        if not isinstance(outputs, list):
+            return cleaned_outputs
+
+        for output in outputs:
             if not isinstance(output, dict):
                 continue
 
@@ -992,28 +1095,12 @@ class StreamingCacheWriter:
             if "metadata" in output:
                 cleaned_output["metadata"] = output.get("metadata")
 
-            outputs.append(cleaned_output)
+            if "encrypted_content" in output:
+                cleaned_output["encrypted_content"] = output.get("encrypted_content")
 
-        metadata = {
-            "model": response.get("model"),
-            "created": response.get("created"),
-            "outputs": outputs,
-        }
+            cleaned_outputs.append(cleaned_output)
 
-        if response.get("id"):
-            metadata["response_id"] = response.get("id")
-
-        if "status" in response:
-            metadata["status"] = response.get("status")
-
-        if "status_details" in response:
-            metadata["status_details"] = response.get("status_details")
-
-        return EventAwareChunk(
-            event_type="response.completed",
-            data_type="response",
-            metadata=metadata,
-        )
+        return cleaned_outputs
 
     def _parse_responses_event(self, chunk: str) -> Optional[EventAwareChunk]:
         """Parse a responses API SSE event and return normalized chunk"""
@@ -1142,13 +1229,17 @@ class StreamingCacheWriter:
                     except json.JSONDecodeError:
                         pass
 
-            await self.cache_manager.redis.rpush(key, chunk)  # type: ignore
+            await await_redis_result(self.cache_manager.redis.rpush(key, chunk))
             # Ensure the list does not linger forever if the stream aborts before [DONE].
-            await self.cache_manager.redis.expire(key, self.cache_manager.ttl)
+            await await_redis_result(
+                self.cache_manager.redis.expire(key, self.cache_manager.ttl)
+            )
             self.chunks_written += 1
             if chunk.strip() == "data: [DONE]":
                 if self._has_content:
-                    await self.cache_manager.redis.expire(key, self.cache_manager.ttl)
+                    await await_redis_result(
+                        self.cache_manager.redis.expire(key, self.cache_manager.ttl)
+                    )
                     logger.info(
                         "chat_streaming_cache_finalized",
                         chunks_written=self.chunks_written,
@@ -1156,7 +1247,7 @@ class StreamingCacheWriter:
                     )
                 else:
                     # No meaningful content – remove the list so that future calls can retry.
-                    await self.cache_manager.redis.delete(key)
+                    await await_redis_result(self.cache_manager.redis.delete(key))
                     logger.info("chat_streaming_cache_skipped_empty", key=key)
         except Exception as e:
             # Redis failures should not crash the stream; they'll be logged upstream.
