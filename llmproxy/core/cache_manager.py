@@ -1106,6 +1106,9 @@ class StreamingCacheWriter:
             if "metadata" in output:
                 cleaned_output["metadata"] = output.get("metadata")
 
+            if "encrypted_content" in output:
+                cleaned_output["encrypted_content"] = output.get("encrypted_content")
+
             cleaned_outputs.append(cleaned_output)
 
         return cleaned_outputs

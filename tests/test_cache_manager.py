@@ -176,3 +176,21 @@ def test_reconstruct_responses_stream_uses_cached_ids():
     assert completed_event["response"]["created_at"] == 1700000005
     outputs = completed_event["response"].get("outputs", [])
     assert outputs and outputs[0].get("id") == "msg_original"
+
+
+def test_completed_outputs_preserve_encrypted_content():
+    """Completed outputs should preserve encrypted reasoning content for cache replay."""
+    cache_manager = CacheManager(redis.Redis(), cache_enabled=False)
+    writer = StreamingCacheWriter(cache_manager, {}, is_responses_api=True)
+
+    outputs = [
+        {
+            "id": "rs_1",
+            "type": "reasoning",
+            "encrypted_content": "enc-abc",
+            "content": [],
+        }
+    ]
+
+    cleaned = writer._clean_completed_outputs(outputs)
+    assert cleaned[0].get("encrypted_content") == "enc-abc"
