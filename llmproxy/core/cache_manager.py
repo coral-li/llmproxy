@@ -1,27 +1,23 @@
 import hashlib
-import inspect
 import json
 import time
 import uuid
 from typing import (
     Any,
     AsyncIterator,
-    Awaitable,
     Dict,
     List,
     Optional,
     Tuple,
-    TypeVar,
     Union,
-    cast,
 )
 
 import redis.asyncio as redis
 
 from .logger import get_logger
+from .redis_utils import await_redis_result
 
 logger = get_logger(__name__)
-_T = TypeVar("_T")
 
 
 class EventAwareChunk:
@@ -260,11 +256,6 @@ class CacheManager:
         key = f"{self.namespace}:{cache_hash}"
 
         return key
-
-    async def _await_redis(self, result: Union[Awaitable[_T], _T]) -> _T:
-        if inspect.isawaitable(result):
-            return await cast(Awaitable[_T], result)
-        return cast(_T, result)
 
     def _affinity_key(self, request_data: dict) -> str:
         """Generate cache key for affinity metadata."""
@@ -673,7 +664,7 @@ class CacheManager:
                     return reconstructed_chunks
             else:
                 # For chat completions, use the existing raw chunk approach
-                chunks = await self._await_redis(self.redis.lrange(key, 0, -1))
+                chunks = await await_redis_result(self.redis.lrange(key, 0, -1))
                 if chunks:
                     self._streaming_hits += 1
                     logger.info(
@@ -844,7 +835,7 @@ class StreamingCacheWriter:
             return
 
         try:
-            await self.cache_manager._await_redis(
+            await await_redis_result(
                 self.cache_manager.redis.delete(self._error_sentinel_key())
             )
             logger.debug(
@@ -886,9 +877,7 @@ class StreamingCacheWriter:
             cleanup_keys.append(f"{cleanup_keys[0]}:normalized")
 
         try:
-            await self.cache_manager._await_redis(
-                self.cache_manager.redis.delete(*cleanup_keys)
-            )
+            await await_redis_result(self.cache_manager.redis.delete(*cleanup_keys))
             logger.debug(
                 "streaming_cache_cleanup",
                 keys=cleanup_keys,
@@ -1240,17 +1229,15 @@ class StreamingCacheWriter:
                     except json.JSONDecodeError:
                         pass
 
-            await self.cache_manager._await_redis(
-                self.cache_manager.redis.rpush(key, chunk)
-            )
+            await await_redis_result(self.cache_manager.redis.rpush(key, chunk))
             # Ensure the list does not linger forever if the stream aborts before [DONE].
-            await self.cache_manager._await_redis(
+            await await_redis_result(
                 self.cache_manager.redis.expire(key, self.cache_manager.ttl)
             )
             self.chunks_written += 1
             if chunk.strip() == "data: [DONE]":
                 if self._has_content:
-                    await self.cache_manager._await_redis(
+                    await await_redis_result(
                         self.cache_manager.redis.expire(key, self.cache_manager.ttl)
                     )
                     logger.info(
@@ -1260,9 +1247,7 @@ class StreamingCacheWriter:
                     )
                 else:
                     # No meaningful content – remove the list so that future calls can retry.
-                    await self.cache_manager._await_redis(
-                        self.cache_manager.redis.delete(key)
-                    )
+                    await await_redis_result(self.cache_manager.redis.delete(key))
                     logger.info("chat_streaming_cache_skipped_empty", key=key)
         except Exception as e:
             # Redis failures should not crash the stream; they'll be logged upstream.
