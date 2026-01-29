@@ -33,34 +33,31 @@ class RedisManager:
         self.client: Optional[redis.Redis] = None
         self._pool: Optional[redis.ConnectionPool] = None
 
+    def _build_pool(self) -> redis.ConnectionPool:
+        pool_kwargs: dict[str, Any] = {
+            "host": self.host,
+            "port": self.port,
+            "password": self.password,
+            "decode_responses": True,
+            "max_connections": 50,
+        }
+
+        if self.ssl_enabled:
+            ssl_cert_reqs = self.ssl_cert_reqs.lower() if self.ssl_cert_reqs else None
+            return redis.ConnectionPool(
+                **pool_kwargs,
+                connection_class=redis.SSLConnection,
+                ssl_cert_reqs=ssl_cert_reqs,
+            )
+
+        return redis.ConnectionPool(**pool_kwargs)
+
     async def connect(self) -> None:
         """Initialize Redis connection with connection pooling"""
+        if self.client is not None:
+            return
         try:
-            # Initialize the connection pool based on SSL usage
-            if self.ssl_enabled:
-                # Create SSL connection pool
-                ssl_cert_reqs = (
-                    self.ssl_cert_reqs.lower() if self.ssl_cert_reqs else None
-                )
-                self._pool = redis.ConnectionPool(
-                    host=self.host,
-                    port=self.port,
-                    password=self.password,
-                    connection_class=redis.SSLConnection,
-                    ssl_cert_reqs=ssl_cert_reqs,
-                    decode_responses=True,
-                    max_connections=50,
-                )
-            else:
-                # Create standard connection pool
-                self._pool = redis.ConnectionPool(
-                    host=self.host,
-                    port=self.port,
-                    password=self.password,
-                    decode_responses=True,
-                    max_connections=50,
-                )
-
+            self._pool = self._build_pool()
             self.client = redis.Redis(connection_pool=self._pool)
 
             # Test connection
@@ -90,6 +87,8 @@ class RedisManager:
                     self._pool.disconnect(), "redis_pool_disconnect_not_awaitable"
                 )
             logger.info("redis_disconnected")
+            self.client = None
+            self._pool = None
 
     async def health_check(self) -> bool:
         """Check if Redis is healthy"""
