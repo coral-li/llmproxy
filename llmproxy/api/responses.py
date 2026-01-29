@@ -36,11 +36,6 @@ class ResponseHandler(BaseRequestHandler):
         )
         self.response_affinity_manager = response_affinity_manager
 
-    async def handle_request(
-        self, request_data: dict
-    ) -> Union[Dict[Any, Any], StreamingResponse]:
-        return await super().handle_request(request_data)
-
     async def _check_cache(
         self, request_data: dict, is_streaming: bool, start_time: float, model: str
     ) -> Optional[Union[Dict[Any, Any], StreamingResponse]]:
