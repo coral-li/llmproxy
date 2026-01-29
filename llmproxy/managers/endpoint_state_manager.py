@@ -645,7 +645,7 @@ class EndpointStateManager:
         """Register an endpoint as part of a model group"""
         try:
             key = self._get_model_group_key(model_group)
-            await self.redis.sadd(key, endpoint_id)  # type: ignore
+            await self.redis.sadd(key, endpoint_id)
             await self.redis.expire(key, self.state_ttl)
 
             logger.debug(
@@ -666,7 +666,7 @@ class EndpointStateManager:
         """Get all endpoint IDs for a model group"""
         try:
             key = self._get_model_group_key(model_group)
-            endpoint_ids = await self.redis.smembers(key)  # type: ignore
+            endpoint_ids = await self.redis.smembers(key)
             return list(endpoint_ids) if endpoint_ids else []
 
         except Exception as e:

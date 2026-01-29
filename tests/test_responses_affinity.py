@@ -1,5 +1,6 @@
 import hashlib
 import re
+import uuid
 
 import httpx
 import redis
@@ -106,3 +107,44 @@ def test_encrypted_reasoning_affinity_mapping(proxy_url, model, llmproxy_server)
     output_text = _extract_output_text(response.json())
     port = _extract_port(output_text)
     assert port == "8001"
+
+
+def test_cached_response_refreshes_affinity(proxy_url, model):
+    unique_input = f"cache-affinity-{uuid.uuid4()}"
+    payload = {
+        "model": model,
+        "input": unique_input,
+    }
+
+    response_1 = httpx.post(f"{proxy_url}/responses", json=payload, timeout=10.0)
+    assert response_1.status_code == 200
+    data_1 = response_1.json()
+    response_id = data_1.get("id")
+    assert response_id, "Missing response id"
+    output_text_1 = _extract_output_text(data_1)
+    port_1 = _extract_port(output_text_1)
+
+    redis_client = redis.Redis(host="localhost", port=6379, decode_responses=True)
+    affinity_key = f"llmproxy:response_affinity:{response_id}"
+    redis_client.delete(affinity_key)
+    assert redis_client.get(affinity_key) is None
+
+    response_2 = httpx.post(f"{proxy_url}/responses", json=payload, timeout=10.0)
+    assert response_2.status_code == 200
+    data_2 = response_2.json()
+    assert data_2.get("_proxy_cache_hit") is True
+    assert redis_client.get(affinity_key) is not None
+
+    follow_payload = {
+        "model": model,
+        "input": "Follow up",
+        "previous_response_id": response_id,
+        "extra_body": {"cache": {"no-cache": True}},
+    }
+
+    response_3 = httpx.post(f"{proxy_url}/responses", json=follow_payload, timeout=10.0)
+    assert response_3.status_code == 200
+    output_text_3 = _extract_output_text(response_3.json())
+    port_3 = _extract_port(output_text_3)
+
+    assert port_3 == port_1

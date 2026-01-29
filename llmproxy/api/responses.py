@@ -41,6 +41,122 @@ class ResponseHandler(BaseRequestHandler):
     ) -> Union[Dict[Any, Any], StreamingResponse]:
         return await super().handle_request(request_data)
 
+    async def _check_cache(
+        self, request_data: dict, is_streaming: bool, start_time: float, model: str
+    ) -> Optional[Union[Dict[Any, Any], StreamingResponse]]:
+        """Check cache for existing response and refresh affinity when needed."""
+        if not self._is_cache_enabled(request_data):
+            return None
+
+        if is_streaming:
+            cached_chunks = await self.cache_manager.get_streaming(request_data)
+            if cached_chunks:
+                return await self._build_cached_streaming_response(
+                    cached_chunks, request_data, start_time, model
+                )
+        else:
+            cached_response = await self.cache_manager.get(request_data)
+            if cached_response:
+                cached_response["_proxy_cache_hit"] = True
+                cached_response["_proxy_latency_ms"] = int(
+                    (time.time() - start_time) * 1000
+                )
+                endpoint_id = await self.cache_manager.get_affinity(request_data)
+                if endpoint_id:
+                    await self._record_affinity_from_response_data(
+                        cached_response, endpoint_id
+                    )
+                else:
+                    logger.debug(
+                        "cached_response_missing_affinity",
+                        model=model,
+                    )
+                return cached_response
+        return None
+
+    async def _build_cached_streaming_response(
+        self,
+        cached_chunks: List[str],
+        request_data: dict,
+        start_time: float,
+        model: str,
+    ) -> StreamingResponse:
+        endpoint_id = await self.cache_manager.get_affinity(request_data)
+        if endpoint_id:
+            response_id = self._extract_response_id_from_cached_chunks(cached_chunks)
+            if response_id:
+                await self.response_affinity_manager.set_endpoint_id(
+                    response_id, endpoint_id
+                )
+            else:
+                logger.debug(
+                    "cached_stream_missing_response_id",
+                    model=model,
+                )
+
+        async def stream_cached_lines() -> AsyncIterator[str]:
+            for chunk in cached_chunks:
+                yield chunk
+
+        stream_iter: AsyncIterator[str] = stream_cached_lines()
+        if endpoint_id:
+            stream_iter = self._wrap_stream_for_affinity(stream_iter, endpoint_id)
+        else:
+            logger.debug(
+                "cached_stream_missing_affinity",
+                model=model,
+            )
+
+        async def stream_cached_response() -> AsyncIterator[bytes]:
+            async for line in stream_iter:
+                yield line.encode("utf-8")
+
+        logger.info(
+            "serving_cached_streaming_response",
+            model=model,
+            num_chunks=len(cached_chunks),
+            latency_ms=int((time.time() - start_time) * 1000),
+        )
+        return StreamingResponse(
+            stream_cached_response(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "X-Proxy-Cache-Hit": "true",
+                "X-Proxy-Latency-Ms": str(int((time.time() - start_time) * 1000)),
+            },
+        )
+
+    def _extract_response_id_from_cached_chunks(
+        self, cached_chunks: List[str]
+    ) -> Optional[str]:
+        for chunk in cached_chunks:
+            response_id = self._extract_response_id_from_stream_line(chunk)
+            if response_id:
+                return response_id
+        return None
+
+    async def _maybe_cache_response(
+        self, request_data: dict, is_streaming: bool, response: dict
+    ) -> None:
+        await super()._maybe_cache_response(request_data, is_streaming, response)
+        if (
+            not is_streaming
+            and response.get("status_code") == 200
+            and self._is_cache_enabled(request_data)
+        ):
+            endpoint_id = response.get("endpoint_id")
+            if isinstance(endpoint_id, str) and endpoint_id:
+                await self.cache_manager.set_affinity(request_data, endpoint_id)
+
+    async def _build_streaming_response(
+        self, endpoint: Endpoint, request_data: dict, response: dict
+    ) -> StreamingResponse:
+        if self._is_cache_enabled(request_data):
+            await self.cache_manager.set_affinity(request_data, endpoint.id)
+        return await super()._build_streaming_response(endpoint, request_data, response)
+
     async def _make_request(
         self, endpoint: Endpoint, request_data: dict, is_streaming: bool
     ) -> dict:
@@ -144,6 +260,7 @@ class ResponseHandler(BaseRequestHandler):
                     response["endpoint_base_url"] = endpoint.params.get(
                         "base_url", "https://api.openai.com"
                     )
+                    response["endpoint_id"] = endpoint.id
                     return response
                 last_response = await self._handle_error_response(
                     endpoint,
@@ -238,16 +355,23 @@ class ResponseHandler(BaseRequestHandler):
     async def _record_affinity_from_response(
         self, response_data: Optional[dict], endpoint: Endpoint
     ) -> None:
+        await self._record_affinity_from_response_data(response_data, endpoint.id)
+
+    async def _record_affinity_from_response_data(
+        self, response_data: Optional[dict], endpoint_id: str
+    ) -> None:
+        if not endpoint_id:
+            return
         response_id = self._extract_response_id(response_data)
         if response_id:
             await self.response_affinity_manager.set_endpoint_id(
-                response_id, endpoint.id
+                response_id, endpoint_id
             )
         for encrypted_content in self._extract_encrypted_reasoning_outputs(
             response_data
         ):
             await self.response_affinity_manager.set_endpoint_id_for_encrypted(
-                encrypted_content, endpoint.id
+                encrypted_content, endpoint_id
             )
 
     def _extract_response_id(self, response_data: Optional[dict]) -> Optional[str]:

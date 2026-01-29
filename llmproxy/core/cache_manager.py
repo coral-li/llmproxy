@@ -248,6 +248,44 @@ class CacheManager:
 
         return key
 
+    def _affinity_key(self, request_data: dict) -> str:
+        """Generate cache key for affinity metadata."""
+        return f"{self._generate_cache_key(request_data)}:affinity"
+
+    async def set_affinity(self, request_data: dict, endpoint_id: str) -> None:
+        """Cache endpoint affinity metadata for a request."""
+        if not endpoint_id or not self._should_cache(request_data):
+            return
+
+        key = self._affinity_key(request_data)
+        try:
+            if self.ttl and self.ttl > 0:
+                await self.redis.setex(key, self.ttl, endpoint_id)
+            else:
+                await self.redis.set(key, endpoint_id)
+            logger.debug("cache_affinity_set", key=key, endpoint_id=endpoint_id)
+        except Exception as e:
+            logger.error("cache_affinity_set_error", error=str(e), key=key)
+
+    async def get_affinity(self, request_data: dict) -> Optional[str]:
+        """Get cached endpoint affinity metadata for a request."""
+        if not self._should_cache(request_data):
+            return None
+
+        key = self._affinity_key(request_data)
+        try:
+            data = await self.redis.get(key)
+            if data is None:
+                return None
+            if isinstance(data, bytes):
+                return data.decode("utf-8")
+            if isinstance(data, str):
+                return data
+            return str(data)
+        except Exception as e:
+            logger.error("cache_affinity_get_error", error=str(e), key=key)
+            return None
+
     def _should_cache(self, request_data: dict) -> bool:
         """Determine if request should be cached"""
         # Check for cache control directives
@@ -617,7 +655,7 @@ class CacheManager:
                     return reconstructed_chunks
             else:
                 # For chat completions, use the existing raw chunk approach
-                chunks = await self.redis.lrange(key, 0, -1)  # type: ignore
+                chunks = await self.redis.lrange(key, 0, -1)
                 if chunks:
                     self._streaming_hits += 1
                     logger.info(
@@ -1177,7 +1215,7 @@ class StreamingCacheWriter:
                     except json.JSONDecodeError:
                         pass
 
-            await self.cache_manager.redis.rpush(key, chunk)  # type: ignore
+            await self.cache_manager.redis.rpush(key, chunk)
             # Ensure the list does not linger forever if the stream aborts before [DONE].
             await self.cache_manager.redis.expire(key, self.cache_manager.ttl)
             self.chunks_written += 1
