@@ -22,7 +22,7 @@ This document provides development tips and project conventions for working on t
 - You MUST follow the DRY principle
 - You MUST ALWAYS keep the code nicely structured, elegant and readable
 - You MUST ALWAYS keep functions nice and don't let them become too long
-- You MUST ALWAYS always follow the latest next.js best practices for high-performance, security and maintainability
+- You MUST ALWAYS always follow the latest best practices for high-performance, security and maintainability
 - You WILL refactor code that becomes too messy or complicated to make it more maintainable and elegant
 
 ## Context7
