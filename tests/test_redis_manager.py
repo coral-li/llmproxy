@@ -38,9 +38,10 @@ class TestRedisManager:
         """Test successful Redis connection"""
         manager = RedisManager(host="localhost", port=6379)
 
-        with patch("redis.asyncio.ConnectionPool") as mock_pool_class, patch(
-            "redis.asyncio.Redis"
-        ) as mock_redis_class:
+        with (
+            patch("redis.asyncio.ConnectionPool") as mock_pool_class,
+            patch("redis.asyncio.Redis") as mock_redis_class,
+        ):
             mock_pool = Mock()
             mock_pool_class.return_value = mock_pool
 
@@ -78,9 +79,11 @@ class TestRedisManager:
             ssl_cert_reqs="required",
         )
 
-        with patch("redis.asyncio.ConnectionPool") as mock_pool_class, patch(
-            "redis.asyncio.Redis"
-        ) as mock_redis_class, patch("ssl.create_default_context") as mock_ssl_context:
+        with (
+            patch("redis.asyncio.ConnectionPool") as mock_pool_class,
+            patch("redis.asyncio.Redis") as mock_redis_class,
+            patch("ssl.create_default_context") as mock_ssl_context,
+        ):
             mock_pool = Mock()
             mock_pool_class.return_value = mock_pool
 
@@ -137,9 +140,10 @@ class TestRedisManager:
         """Test Redis connection with password"""
         manager = RedisManager(host="localhost", port=6379, password="secret123")
 
-        with patch("redis.asyncio.ConnectionPool") as mock_pool_class, patch(
-            "redis.asyncio.Redis"
-        ) as mock_redis_class:
+        with (
+            patch("redis.asyncio.ConnectionPool") as mock_pool_class,
+            patch("redis.asyncio.Redis") as mock_redis_class,
+        ):
             mock_pool = Mock()
             mock_pool_class.return_value = mock_pool
 
@@ -162,9 +166,10 @@ class TestRedisManager:
         """Test Redis connection failure"""
         manager = RedisManager(host="localhost", port=6379)
 
-        with patch("redis.asyncio.ConnectionPool"), patch(
-            "redis.asyncio.Redis"
-        ) as mock_redis_class:
+        with (
+            patch("redis.asyncio.ConnectionPool"),
+            patch("redis.asyncio.Redis") as mock_redis_class,
+        ):
             mock_client = AsyncMock()
             mock_client.ping.side_effect = redis.ConnectionError("Connection failed")
             mock_redis_class.return_value = mock_client

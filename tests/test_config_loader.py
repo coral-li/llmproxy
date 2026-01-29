@@ -186,8 +186,9 @@ class TestLoadConfig:
             with open(config_path, "w") as f:
                 yaml.dump(config_content, f)
 
-            with patch("os.getcwd", return_value=temp_dir), patch.dict(
-                os.environ, {}, clear=True
+            with (
+                patch("os.getcwd", return_value=temp_dir),
+                patch.dict(os.environ, {}, clear=True),
             ):  # Clear LLMPROXY_CONFIG
                 config = await load_config_async()
                 assert config.general_settings.bind_address == "localhost"

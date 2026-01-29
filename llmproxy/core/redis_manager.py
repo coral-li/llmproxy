@@ -1,11 +1,17 @@
 import inspect
-from typing import Optional, Union
+from typing import Any, Awaitable, Optional, Union
 
 import redis.asyncio as redis
 
 from .logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _ensure_awaitable(value: object, error_label: str) -> Awaitable[Any]:
+    if not inspect.isawaitable(value):
+        raise TypeError(error_label)
+    return value
 
 
 class RedisManager:
@@ -59,7 +65,9 @@ class RedisManager:
 
             # Test connection
             assert self.client is not None  # mypy: Redis constructor cannot return None
-            await self.client.ping()
+            await _ensure_awaitable(
+                self.client.ping(), "redis_client_ping_not_awaitable"
+            )
             logger.info(
                 "redis_connected", host=self.host, port=self.port, ssl=self.ssl_enabled
             )
@@ -73,25 +81,23 @@ class RedisManager:
         if self.client:
             # Why check isawaitable: redis-py has varied sync/async APIs across versions.
             # We fail fast if these are not coroutines to avoid silently skipping cleanup.
-            _client_close = self.client.aclose()
-            assert inspect.isawaitable(
-                _client_close
-            ), "redis_client_aclose_not_awaitable"
-            await _client_close
+            await _ensure_awaitable(
+                self.client.aclose(), "redis_client_aclose_not_awaitable"
+            )
             if self._pool:
                 # Same rationale as above: assert awaitable to catch version drift early.
-                _pool_disconnect = self._pool.disconnect()
-                assert inspect.isawaitable(
-                    _pool_disconnect
-                ), "redis_pool_disconnect_not_awaitable"
-                await _pool_disconnect
+                await _ensure_awaitable(
+                    self._pool.disconnect(), "redis_pool_disconnect_not_awaitable"
+                )
             logger.info("redis_disconnected")
 
     async def health_check(self) -> bool:
         """Check if Redis is healthy"""
         try:
             if self.client is not None:
-                await self.client.ping()
+                await _ensure_awaitable(
+                    self.client.ping(), "redis_client_ping_not_awaitable"
+                )
                 return True
             return False
         except Exception as e:

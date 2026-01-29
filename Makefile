@@ -5,10 +5,10 @@ help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 install:  ## Install production dependencies
-	pip install -e .
+	uv sync
 
 install-dev:  ## Install development dependencies
-	pip install -e ".[dev]"
+	uv pip install -e ".[dev]"
 	pre-commit install
 
 format:  ## Format code with black and isort
@@ -21,7 +21,11 @@ lint:  ## Run linting checks
 	isort --check-only llmproxy tests
 
 type-check:  ## Run type checking with mypy
-	mypy llmproxy
+	@if [ -x .venv/bin/python ]; then \
+		.venv/bin/python -m mypy llmproxy; \
+	else \
+		python -m mypy llmproxy; \
+	fi
 
 test:  ## Run tests
 	pytest
