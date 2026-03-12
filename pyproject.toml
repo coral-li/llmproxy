@@ -46,7 +46,7 @@ dev = [
     "pytest-asyncio",
     "pytest-mock",
     "pytest-xdist",
-    "black==25.9.0",
+    "black==26.3.1",
     "flake8==7.3.0",
     "isort==6.1.0",
     "mypy==1.8.0",
@@ -61,7 +61,7 @@ test = [
     "pytest-xdist",
 ]
 lint = [
-    "black==25.9.0",
+    "black==26.3.1",
     "flake8==7.3.0",
     "isort==6.1.0",
     "mypy==1.8.0",
