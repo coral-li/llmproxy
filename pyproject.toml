@@ -31,9 +31,9 @@ dependencies = [
     "pydantic-settings",
     "httpx",
     "openai",
-    "requests",
+    "requests>=2.33.0",
     "pyyaml",
-    "python-dotenv",
+    "python-dotenv>=1.2.2",
     "aiofiles",
     "structlog",
     "redis",
@@ -42,11 +42,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
+    "pytest>=9.0.3",
     "pytest-asyncio",
     "pytest-mock",
     "pytest-xdist",
-    "black==25.9.0",
+    "black==26.3.1",
     "flake8==7.3.0",
     "isort==6.1.0",
     "mypy==1.8.0",
@@ -55,13 +55,13 @@ dev = [
     "pre-commit",
 ]
 test = [
-    "pytest",
+    "pytest>=9.0.3",
     "pytest-asyncio",
     "pytest-mock",
     "pytest-xdist",
 ]
 lint = [
-    "black==25.9.0",
+    "black==26.3.1",
     "flake8==7.3.0",
     "isort==6.1.0",
     "mypy==1.8.0",
@@ -69,6 +69,9 @@ lint = [
     "types-aiofiles",
     "pre-commit",
 ]
+
+[tool.uv]
+exclude-newer = "5 days"
 
 [project.scripts]
 llmproxy = "llmproxy.cli:main"
