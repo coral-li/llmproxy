@@ -71,7 +71,7 @@ lint = [
 ]
 
 [tool.uv]
-exclude-newer = "5 days"
+exclude-newer = "7 days"
 
 [project.scripts]
 llmproxy = "llmproxy.cli:main"

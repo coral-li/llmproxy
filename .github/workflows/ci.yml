@@ -30,35 +30,33 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Cache pip dependencies
-        uses: actions/cache@v3
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}-v3
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          version: "0.9.28"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          uv sync --locked --extra dev
 
       - name: Run formatting check
         run: |
-          black --check llmproxy tests
-          isort --check-only llmproxy tests
+          uv run --locked --extra dev black --check llmproxy tests
+          uv run --locked --extra dev isort --check-only llmproxy tests
 
       - name: Run linting
         run: |
-          flake8 llmproxy tests
+          uv run --locked --extra dev flake8 llmproxy tests
 
       - name: Run type checking
         run: |
-          mypy llmproxy
+          uv run --locked --extra dev mypy llmproxy
 
       - name: Run tests
         run: |
-          pytest
+          uv run --locked --extra dev pytest
         env:
           REDIS_HOST: localhost
           REDIS_PORT: 6379

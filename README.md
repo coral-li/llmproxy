@@ -27,8 +27,9 @@ tests/          # Pytest suite with mock upstream servers
 
 ### Requirements
 
-- Python 3.9 or newer (3.11+ recommended)
+- Python 3.12 or newer
 - Redis 6+
+- uv
 - API keys for your upstream providers (OpenAI, Azure OpenAI, etc.)
 
 ### 1. Clone and install
@@ -36,16 +37,13 @@ tests/          # Pytest suite with mock upstream servers
 ```bash
 git clone https://github.com/yourusername/llmproxy.git
 cd llmproxy
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+uv sync --locked --no-dev
 ```
 
 For development tooling (black, mypy, etc.):
 
 ```bash
-pip install -e ".[dev]"
-pre-commit install
+make install-dev
 ```
 
 ### 2. Configure credentials
@@ -68,9 +66,9 @@ Key sections in `llmproxy.yaml`:
 Start Redis if you do not have one running already (`brew services start redis` on macOS). Then launch the proxy:
 
 ```bash
-llmproxy --config llmproxy.yaml
+uv run --locked --no-dev llmproxy --config llmproxy.yaml
 # or
-python -m llmproxy.cli --log-level INFO
+uv run --locked --no-dev python -m llmproxy.cli --log-level INFO
 ```
 
 By default the proxy reads `llmproxy.yaml` in the working directory and binds to the address/port defined under `general_settings` (`127.0.0.1:4243` in the sample file).
@@ -178,11 +176,19 @@ The async loader in `llmproxy/config/config_loader.py` resolves `os.environ/VAR`
 
 ```bash
 make install-dev   # editable install + dev dependencies + pre-commit
+make upgrade       # refresh locked dependencies with the configured package-age delay
 make pre-commit    # format, lint, type-check
 make test          # run full pytest suite (starts mock servers + Redis)
 ```
 
 Pytest spins up mock upstream servers, a dedicated proxy instance, and handles Redis automatically. Tests cover caching behavior, failover logic, streaming, and CLI ergonomics.
+
+## Dependency Policy
+
+Dependency resolution uses uv with a 7-day `exclude-newer` cooldown. Routine
+installs use the committed `uv.lock` file via `uv sync --locked`; use
+`make upgrade` when you intentionally want to refresh dependency versions under
+that cooldown.
 
 Useful scripts:
 
