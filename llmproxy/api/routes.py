@@ -250,7 +250,14 @@ async def _read_limited_json(request: Request, max_body_bytes: int) -> dict:
         if len(body) > max_body_bytes:
             raise _payload_too_large(max_body_bytes)
 
-    parsed = json.loads(bytes(body))
+    try:
+        parsed = json.loads(bytes(body))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Request body is not valid JSON",
+        ) from None
+
     if not isinstance(parsed, dict):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -138,6 +138,29 @@ async def test_handle_endpoint_allows_under_limit_json_to_reach_handler():
 
 
 @pytest.mark.asyncio
+async def test_handle_endpoint_rejects_invalid_json_before_handler():
+    request = build_request([b'{"model":'])
+    handler_called = False
+
+    async def process_func(handler, request_data):
+        nonlocal handler_called
+        handler_called = True
+        return {"ok": True}
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _handle_endpoint(
+            request,
+            get_handler=lambda: object(),
+            process_func=process_func,
+            config_provider=config_provider(1024),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Request body is not valid JSON"
+    assert handler_called is False
+
+
+@pytest.mark.asyncio
 async def test_oversized_non_streaming_response_is_not_cached():
     redis = InMemoryRedis()
     cache = CacheManager(redis, cache_enabled=True, max_cache_entry_bytes=64)
