@@ -178,6 +178,49 @@ def test_reconstruct_responses_stream_uses_cached_ids():
     assert outputs and outputs[0].get("id") == "msg_original"
 
 
+def test_reconstruct_responses_stream_handles_response_done_chunks():
+    """Reconstruction should accept cached terminal chunks from either event name."""
+
+    cache_manager = CacheManager(redis.Redis(), cache_enabled=False)
+
+    reconstructed = cache_manager._reconstruct_responses_stream(
+        [
+            {
+                "event_type": "response.done",
+                "data_type": "response",
+                "content": None,
+                "metadata": {
+                    "model": "gpt-4",
+                    "created": 1700000005,
+                    "response_id": "resp_original",
+                    "outputs": [
+                        {
+                            "id": "msg_original",
+                            "type": "message",
+                            "status": "completed",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "Hello"}],
+                        }
+                    ],
+                },
+            }
+        ]
+    )
+    data_events = [
+        json.loads(line[len("data: ") :].strip())
+        for line in reconstructed
+        if line.startswith("data: ")
+    ]
+
+    completed_event = next(
+        ev for ev in data_events if ev.get("type") == "response.completed"
+    )
+    assert completed_event["response"]["id"] == "resp_original"
+    assert completed_event["response"]["created_at"] == 1700000005
+    outputs = completed_event["response"].get("outputs", [])
+    assert outputs and outputs[0].get("id") == "msg_original"
+
+
 def test_completed_outputs_preserve_encrypted_content():
     """Completed outputs should preserve encrypted reasoning content for cache replay."""
     cache_manager = CacheManager(redis.Redis(), cache_enabled=False)

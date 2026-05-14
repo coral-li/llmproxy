@@ -782,6 +782,7 @@ class CacheManager:
             "response.output_item.added": rebuilder.handle_output_item_added,
             "response.output_text.delta": rebuilder.handle_output_text_delta,
             "response.completed": rebuilder.handle_completed,
+            "response.done": rebuilder.handle_completed,
         }
 
         for chunk_data in normalized_chunks:
