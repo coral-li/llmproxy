@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import time
@@ -13,6 +14,8 @@ from typing import (
 )
 
 import redis.asyncio as redis
+
+from llmproxy.config_model import DEFAULT_MAX_CACHE_ENTRY_BYTES
 
 from .logger import get_logger
 from .redis_utils import await_redis_result
@@ -237,11 +240,13 @@ class CacheManager:
         ttl: int = 604800,
         namespace: str = "llmproxy",
         cache_enabled: bool = True,
+        max_cache_entry_bytes: int = DEFAULT_MAX_CACHE_ENTRY_BYTES,
     ):
         self.redis = redis_client
         self.ttl = ttl
         self.namespace = namespace
         self.cache_enabled = cache_enabled  # Global cache setting from config
+        self.max_cache_entry_bytes = max_cache_entry_bytes
         self._hits = 0
         self._misses = 0
         self._streaming_hits = 0
@@ -350,6 +355,15 @@ class CacheManager:
         key = self._generate_cache_key(request_data)
 
         try:
+            if await self._cached_string_exceeds_limit(key):
+                self._misses += 1
+                logger.info(
+                    "cache_skip_oversized_read",
+                    key=key,
+                    max_bytes=self.max_cache_entry_bytes,
+                )
+                return None
+
             data = await self.redis.get(key)
 
             if data:
@@ -615,7 +629,18 @@ class CacheManager:
         key = self._generate_cache_key(request_data)
 
         try:
-            await self.redis.setex(key, self.ttl, json.dumps(response_data))
+            serialized = json.dumps(response_data)
+            serialized_size = self._encoded_size(serialized)
+            if serialized_size > self.max_cache_entry_bytes:
+                logger.info(
+                    "cache_skip_oversized_response",
+                    key=key,
+                    size_bytes=serialized_size,
+                    max_bytes=self.max_cache_entry_bytes,
+                )
+                return
+
+            await self.redis.setex(key, self.ttl, serialized)
             logger.debug("cache_set", key=key, ttl=self.ttl)
 
         except Exception as e:
@@ -645,7 +670,18 @@ class CacheManager:
 
             # For responses API, get normalized chunks
             if is_responses_api:
-                normalized_data = await self.redis.get(f"{key}:normalized")
+                normalized_key = f"{key}:normalized"
+                if await self._cached_string_exceeds_limit(normalized_key):
+                    self._streaming_misses += 1
+                    logger.info(
+                        "streaming_cache_skip_oversized_read",
+                        key=normalized_key,
+                        api_type="responses",
+                        max_bytes=self.max_cache_entry_bytes,
+                    )
+                    return None
+
+                normalized_data = await self.redis.get(normalized_key)
                 if normalized_data:
                     normalized_chunks = json.loads(normalized_data)
                     # Reconstruct SSE stream from normalized chunks
@@ -664,8 +700,19 @@ class CacheManager:
                     return reconstructed_chunks
             else:
                 # For chat completions, use the existing raw chunk approach
-                chunks = await await_redis_result(self.redis.lrange(key, 0, -1))
+                cached_chunks = await await_redis_result(self.redis.lrange(key, 0, -1))
+                chunks = self._decode_stream_chunks(cached_chunks, key)
                 if chunks:
+                    if not self._is_chat_stream_complete(chunks):
+                        self._streaming_misses += 1
+                        logger.info(
+                            "streaming_cache_incomplete",
+                            key=key,
+                            api_type="chat",
+                            num_chunks=len(chunks),
+                        )
+                        return None
+
                     self._streaming_hits += 1
                     logger.info(
                         "streaming_cache_hit",
@@ -673,7 +720,7 @@ class CacheManager:
                         api_type="chat",
                         num_chunks=len(chunks),
                     )
-                    return list(chunks)
+                    return chunks
 
             self._streaming_misses += 1
             logger.debug(
@@ -686,6 +733,45 @@ class CacheManager:
         except Exception as e:
             logger.error("streaming_cache_get_error", error=str(e), key=key)
             return None
+
+    def _decode_stream_chunks(self, chunks: Any, key: str) -> Optional[List[str]]:
+        decoded_chunks: List[str] = []
+        if not isinstance(chunks, list):
+            logger.debug("streaming_cache_invalid_chunks", key=key)
+            return None
+
+        try:
+            for chunk in chunks:
+                if isinstance(chunk, bytes):
+                    decoded_chunks.append(chunk.decode("utf-8"))
+                elif isinstance(chunk, str):
+                    decoded_chunks.append(chunk)
+                else:
+                    decoded_chunks.append(str(chunk))
+        except UnicodeDecodeError as e:
+            logger.error("streaming_cache_decode_error", error=str(e), key=key)
+            return None
+
+        return decoded_chunks
+
+    def _is_chat_stream_complete(self, chunks: List[str]) -> bool:
+        return bool(chunks) and chunks[-1].strip() == "data: [DONE]"
+
+    def _encoded_size(self, value: str) -> int:
+        return len(value.encode("utf-8"))
+
+    async def _cached_string_exceeds_limit(self, key: str) -> bool:
+        strlen = getattr(self.redis, "strlen", None)
+        if not callable(strlen):
+            return False
+
+        try:
+            cached_size = await await_redis_result(strlen(key))
+        except Exception as e:  # pragma: no cover - best effort guard
+            logger.debug("cache_strlen_failed", key=key, error=str(e))
+            return False
+
+        return isinstance(cached_size, int) and cached_size > self.max_cache_entry_bytes
 
     def _reconstruct_responses_stream(self, normalized_chunks: List[dict]) -> List[str]:
         """Reconstruct responses API SSE stream from normalized chunks"""
@@ -822,10 +908,18 @@ class StreamingCacheWriter:
         self._has_content: bool = False
         self._error_payload: Optional[dict] = None
         self._sentinel_cleared = False
+        self._chat_stream_temp_key: Optional[str] = None
+        self._cache_write_disabled = False
+        self._stream_cache_bytes = 0
 
     def _stream_key(self) -> str:
         suffix = ":responses_stream" if self.is_responses_api else ":stream"
         return f"{self.cache_manager._generate_cache_key(self.request_data)}{suffix}"
+
+    def _chat_stream_write_key(self) -> str:
+        if self._chat_stream_temp_key is None:
+            self._chat_stream_temp_key = f"{self._stream_key()}:tmp:{uuid.uuid4().hex}"
+        return self._chat_stream_temp_key
 
     def _error_sentinel_key(self) -> str:
         return f"{self._stream_key()}:error"
@@ -870,18 +964,31 @@ class StreamingCacheWriter:
                 error=str(sentinel_error),
             )
 
-    async def _handle_stream_cleanup(self) -> None:
+    async def _handle_stream_cleanup(
+        self,
+        *,
+        remove_finalized: bool = True,
+        mark_failure: bool = True,
+    ) -> None:
         """Remove any partially written cache artifacts when a stream fails."""
-        cleanup_keys = [self._stream_key()]
+        cleanup_keys = []
         if self.is_responses_api:
-            cleanup_keys.append(f"{cleanup_keys[0]}:normalized")
+            if remove_finalized:
+                cleanup_keys.append(self._stream_key())
+                cleanup_keys.append(f"{self._stream_key()}:normalized")
+        else:
+            if self._chat_stream_temp_key is not None:
+                cleanup_keys.append(self._chat_stream_temp_key)
+            if remove_finalized:
+                cleanup_keys.append(self._stream_key())
 
         try:
-            await await_redis_result(self.cache_manager.redis.delete(*cleanup_keys))
-            logger.debug(
-                "streaming_cache_cleanup",
-                keys=cleanup_keys,
-            )
+            if cleanup_keys:
+                await await_redis_result(self.cache_manager.redis.delete(*cleanup_keys))
+                logger.debug(
+                    "streaming_cache_cleanup",
+                    keys=cleanup_keys,
+                )
         except Exception as cleanup_error:  # pragma: no cover - best effort cleanup
             logger.debug(
                 "streaming_cache_cleanup_failed",
@@ -889,10 +996,36 @@ class StreamingCacheWriter:
                 error=str(cleanup_error),
             )
         finally:
-            await self._mark_stream_failure()
+            if mark_failure:
+                await self._mark_stream_failure()
             self.buffered_lines = []
             self.normalized_chunks = None
             self._has_content = False
+            self._chat_stream_temp_key = None
+            self._stream_cache_bytes = 0
+
+    async def _track_stream_cache_bytes(self, chunk: str) -> bool:
+        if self._cache_write_disabled:
+            return False
+
+        next_size = self._stream_cache_bytes + self.cache_manager._encoded_size(chunk)
+        if next_size <= self.cache_manager.max_cache_entry_bytes:
+            self._stream_cache_bytes = next_size
+            return True
+
+        logger.info(
+            "streaming_cache_skip_oversized_response",
+            key=self._stream_key(),
+            size_bytes=next_size,
+            max_bytes=self.cache_manager.max_cache_entry_bytes,
+            api_type="responses" if self.is_responses_api else "chat",
+        )
+        self._cache_write_disabled = True
+        await self._handle_stream_cleanup(
+            remove_finalized=False,
+            mark_failure=False,
+        )
+        return False
 
     def _parse_sse_lines(self, chunk: str) -> Tuple[Optional[str], Optional[dict]]:
         """Parse SSE lines to extract event type and data"""
@@ -929,6 +1062,7 @@ class StreamingCacheWriter:
             "response.output_item.added": self._normalize_output_item_added,
             "response.output_text.delta": self._normalize_output_text_delta,
             "response.completed": self._normalize_response_completed,
+            "response.done": self._normalize_response_completed,
         }
 
         handler = handlers.get(event_type)
@@ -1040,7 +1174,10 @@ class StreamingCacheWriter:
             event_data.get("response", {}) if isinstance(event_data, dict) else {}
         )
         created_at, created = self._extract_created_metadata(response)
-        outputs = self._clean_completed_outputs(response.get("outputs", []))
+        outputs = response.get("outputs")
+        if outputs is None:
+            outputs = response.get("output", [])
+        outputs = self._clean_completed_outputs(outputs)
 
         metadata = {
             "model": response.get("model"),
@@ -1159,6 +1296,9 @@ class StreamingCacheWriter:
         return False
 
     async def _handle_responses_api(self, chunk: str) -> None:
+        if not await self._track_stream_cache_bytes(chunk):
+            return
+
         self.buffered_lines.append(chunk)
         logger.debug(
             "responses_api_buffering_chunk",
@@ -1198,36 +1338,19 @@ class StreamingCacheWriter:
                     chunk_index=self.chunks_written,
                 )
             self.buffered_lines = []
-            if "event: response.completed" in full_event:
+            if (
+                "event: response.completed" in full_event
+                or "event: response.done" in full_event
+            ):
                 await self._finalize_responses_cache()
 
     async def _handle_chat_completions(self, chunk: str) -> None:
-        key = self._stream_key()
+        key = self._chat_stream_write_key()
         try:
-            # Detect if chunk carries non-empty content; this is a best-effort
-            # heuristic based on the OpenAI chat completions streaming format.
-            if chunk.startswith("data: "):
-                json_part = chunk[6:].strip()
-                if json_part and json_part != "[DONE]":
-                    try:
-                        payload = json.loads(json_part)
-                        if isinstance(payload, dict):
-                            for choice in payload.get("choices", []):
-                                delta = (
-                                    choice.get("delta", {})
-                                    if isinstance(choice, dict)
-                                    else {}
-                                )
-                                content = (
-                                    delta.get("content")
-                                    if isinstance(delta, dict)
-                                    else None
-                                )
-                                if isinstance(content, str) and content.strip():
-                                    self._has_content = True
-                                    break
-                    except json.JSONDecodeError:
-                        pass
+            if not await self._track_stream_cache_bytes(chunk):
+                return
+
+            self._mark_chat_chunk_content(chunk)
 
             await await_redis_result(self.cache_manager.redis.rpush(key, chunk))
             # Ensure the list does not linger forever if the stream aborts before [DONE].
@@ -1237,13 +1360,11 @@ class StreamingCacheWriter:
             self.chunks_written += 1
             if chunk.strip() == "data: [DONE]":
                 if self._has_content:
-                    await await_redis_result(
-                        self.cache_manager.redis.expire(key, self.cache_manager.ttl)
-                    )
+                    await self._finalize_chat_cache(key)
                     logger.info(
                         "chat_streaming_cache_finalized",
                         chunks_written=self.chunks_written,
-                        key=key,
+                        key=self._stream_key(),
                     )
                 else:
                     # No meaningful content – remove the list so that future calls can retry.
@@ -1253,6 +1374,38 @@ class StreamingCacheWriter:
             # Redis failures should not crash the stream; they'll be logged upstream.
             logger.error("chat_streaming_cache_error", error=str(e))
             await self._handle_stream_cleanup()
+
+    def _mark_chat_chunk_content(self, chunk: str) -> None:
+        if not chunk.startswith("data: "):
+            return
+
+        json_part = chunk[6:].strip()
+        if not json_part or json_part == "[DONE]":
+            return
+
+        try:
+            payload = json.loads(json_part)
+        except json.JSONDecodeError:
+            return
+
+        if not isinstance(payload, dict):
+            return
+
+        for choice in payload.get("choices", []):
+            delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
+            content = delta.get("content") if isinstance(delta, dict) else None
+            if isinstance(content, str) and content.strip():
+                self._has_content = True
+                return
+
+    async def _finalize_chat_cache(self, temp_key: str) -> None:
+        """Publish a complete chat stream cache after the terminal chunk is written."""
+        final_key = self._stream_key()
+        await await_redis_result(self.cache_manager.redis.rename(temp_key, final_key))
+        await await_redis_result(
+            self.cache_manager.redis.expire(final_key, self.cache_manager.ttl)
+        )
+        self._chat_stream_temp_key = None
 
     async def _finalize_responses_cache(self) -> None:
         """Finalize the responses API cache with normalized chunks."""
@@ -1264,10 +1417,21 @@ class StreamingCacheWriter:
                 return
 
             normalized_key = f"{key}:normalized"
+            serialized_chunks = json.dumps(self.normalized_chunks)
+            serialized_size = self.cache_manager._encoded_size(serialized_chunks)
+            if serialized_size > self.cache_manager.max_cache_entry_bytes:
+                logger.info(
+                    "responses_streaming_cache_skipped_oversized",
+                    key=key,
+                    size_bytes=serialized_size,
+                    max_bytes=self.cache_manager.max_cache_entry_bytes,
+                )
+                return
+
             await self.cache_manager.redis.setex(
                 normalized_key,
                 self.cache_manager.ttl,
-                json.dumps(self.normalized_chunks),
+                serialized_chunks,
             )
 
             logger.info(
@@ -1326,6 +1490,14 @@ class StreamingCacheWriter:
                     return
                 else:
                     yield processed_chunk
+        except asyncio.CancelledError:
+            self._error_occurred = True
+            await self._handle_stream_cleanup(
+                remove_finalized=False,
+                mark_failure=False,
+            )
+            logger.debug("streaming_cache_writer_cancelled")
+            raise
         except Exception as e:
             self._error_occurred = True
             await self._handle_stream_cleanup()

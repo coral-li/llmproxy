@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -6,6 +7,55 @@ from llmproxy.core.cache_manager import (
     CacheManager,
     StreamingCacheAborted,
 )
+
+
+class InMemoryRedis:
+    def __init__(self):
+        self.values = {}
+        self.lists = {}
+        self.expirations = {}
+
+    async def get(self, key):
+        return self.values.get(key)
+
+    async def setex(self, key, ttl, value):
+        self.values[key] = value
+        self.expirations[key] = ttl
+        return True
+
+    async def rpush(self, key, *values):
+        self.lists.setdefault(key, []).extend(values)
+        return len(self.lists[key])
+
+    async def expire(self, key, ttl):
+        self.expirations[key] = ttl
+        return key in self.values or key in self.lists
+
+    async def delete(self, *keys):
+        deleted = 0
+        for key in keys:
+            deleted += int(self.values.pop(key, None) is not None)
+            deleted += int(self.lists.pop(key, None) is not None)
+            self.expirations.pop(key, None)
+        return deleted
+
+    async def lrange(self, key, start, end):
+        values = self.lists.get(key, [])
+        if end == -1:
+            return values[start:]
+        return values[start : end + 1]
+
+    async def rename(self, source, destination):
+        if source in self.lists:
+            self.lists[destination] = self.lists.pop(source)
+        elif source in self.values:
+            self.values[destination] = self.values.pop(source)
+        else:
+            raise KeyError(source)
+
+        if source in self.expirations:
+            self.expirations[destination] = self.expirations.pop(source)
+        return True
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -89,3 +139,56 @@ async def test_get_streaming_skips_cache_when_error_sentinel_present():
     assert result is None
     assert cache._streaming_misses == 1
     mock_redis.lrange.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_chat_stream_does_not_publish_partial_cache():
+    redis = InMemoryRedis()
+    cache = CacheManager(redis, ttl=120, cache_enabled=True)
+    request = {"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]}
+    writer = await cache.create_streaming_cache_writer(request)
+    chunk = 'data: {"choices": [{"delta": {"content": "partial"}}]}'
+
+    async def upstream():
+        yield chunk
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in writer.intercept_stream(upstream()):
+            pass
+
+    assert await cache.get_streaming(request) is None
+
+
+@pytest.mark.asyncio
+async def test_get_streaming_ignores_chat_cache_without_done_marker():
+    redis = InMemoryRedis()
+    cache = CacheManager(redis, ttl=120, cache_enabled=True)
+    request = {"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]}
+    key = f"{cache._generate_cache_key(request)}:stream"
+    redis.lists[key] = ['data: {"choices": [{"delta": {"content": "partial"}}]}']
+
+    assert await cache.get_streaming(request) is None
+
+
+@pytest.mark.asyncio
+async def test_completed_chat_stream_is_cached():
+    redis = InMemoryRedis()
+    cache = CacheManager(redis, ttl=120, cache_enabled=True)
+    request = {"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]}
+    writer = await cache.create_streaming_cache_writer(request)
+    chunks = [
+        'data: {"choices": [{"delta": {"content": "complete"}}]}',
+        "data: [DONE]",
+    ]
+
+    async def upstream():
+        for chunk in chunks:
+            yield chunk
+
+    collected = []
+    async for chunk in writer.intercept_stream(upstream()):
+        collected.append(chunk)
+
+    assert collected == chunks
+    assert await cache.get_streaming(request) == chunks

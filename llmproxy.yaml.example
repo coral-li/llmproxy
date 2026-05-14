@@ -49,6 +49,8 @@ general_settings:
   bind_port: 4000
   http_timeout: 300 # seconds
   http_max_connections: 100 # max concurrent upstream connections per worker
+  # max_request_body_bytes: 33554432 # 32 MiB max inbound API request body
+  # max_cache_entry_bytes: 67108864 # 64 MiB max Redis cache entry
   num_retries: 3 # number of retries for each request
   allowed_fails: 1 # number of allowed fails for each endpoint
   cooldown_time: 60 # cooldown time for each endpoint
