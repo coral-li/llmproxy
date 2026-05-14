@@ -1447,7 +1447,6 @@ class StreamingCacheWriter:
                 "responses_streaming_cache_finalize_error", error=str(e), key=key
             )
             return None
-            pass
 
     def _infer_content_from_completed_event(self) -> bool:
         """Infer presence of meaningful content from a response.completed event."""
