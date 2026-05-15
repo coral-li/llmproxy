@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from llmproxy.config.config_loader import load_config_async, resolve_env_vars
 from llmproxy.config_model import LLMProxyConfig
@@ -327,6 +328,75 @@ class TestLoadConfig:
             config = await load_config_async(config_path)
             # Should load successfully without cache_params
             assert config.general_settings.bind_address == "127.0.0.1"
+        finally:
+            os.unlink(config_path)
+
+    async def test_load_config_uses_default_resource_limits(self):
+        """Test resource limit defaults when config omits them."""
+        config_content = {
+            "general_settings": {
+                "bind_address": "127.0.0.1",
+                "bind_port": 8000,
+                "redis_host": "localhost",
+                "redis_port": 6379,
+                "redis_password": "",
+            },
+            "model_groups": [{"model_group": "test", "models": []}],
+        }
+
+        config_path = self.create_test_config_file(config_content)
+        try:
+            config = await load_config_async(config_path)
+            assert config.general_settings.max_request_body_bytes == 32 * 1024 * 1024
+            assert config.general_settings.max_cache_entry_bytes == 64 * 1024 * 1024
+        finally:
+            os.unlink(config_path)
+
+    async def test_load_config_accepts_resource_limit_overrides(self):
+        """Test resource limit overrides."""
+        config_content = {
+            "general_settings": {
+                "bind_address": "127.0.0.1",
+                "bind_port": 8000,
+                "redis_host": "localhost",
+                "redis_port": 6379,
+                "redis_password": "",
+                "max_request_body_bytes": 4096,
+                "max_cache_entry_bytes": 8192,
+            },
+            "model_groups": [{"model_group": "test", "models": []}],
+        }
+
+        config_path = self.create_test_config_file(config_content)
+        try:
+            config = await load_config_async(config_path)
+            assert config.general_settings.max_request_body_bytes == 4096
+            assert config.general_settings.max_cache_entry_bytes == 8192
+        finally:
+            os.unlink(config_path)
+
+    @pytest.mark.parametrize(
+        "field",
+        ["max_request_body_bytes", "max_cache_entry_bytes"],
+    )
+    async def test_load_config_rejects_non_positive_resource_limits(self, field):
+        """Test resource limits reject non-positive values."""
+        config_content = {
+            "general_settings": {
+                "bind_address": "127.0.0.1",
+                "bind_port": 8000,
+                "redis_host": "localhost",
+                "redis_port": 6379,
+                "redis_password": "",
+                field: 0,
+            },
+            "model_groups": [{"model_group": "test", "models": []}],
+        }
+
+        config_path = self.create_test_config_file(config_content)
+        try:
+            with pytest.raises(ValidationError):
+                await load_config_async(config_path)
         finally:
             os.unlink(config_path)
 

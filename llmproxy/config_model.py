@@ -2,6 +2,9 @@ from typing import List, Optional, Union
 
 from pydantic import BaseModel, Field
 
+DEFAULT_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024
+DEFAULT_MAX_CACHE_ENTRY_BYTES = 64 * 1024 * 1024
+
 
 class ModelConfig(BaseModel):
     """Configuration for an individual model endpoint"""
@@ -59,6 +62,14 @@ class GeneralSettings(BaseModel):
     cache: bool = True
     cache_params: Optional[CacheParams] = None
     response_affinity_ttl: int = Field(default=21600, gt=0)
+    max_request_body_bytes: int = Field(
+        default=DEFAULT_MAX_REQUEST_BODY_BYTES,
+        gt=0,
+    )
+    max_cache_entry_bytes: int = Field(
+        default=DEFAULT_MAX_CACHE_ENTRY_BYTES,
+        gt=0,
+    )
 
 
 class LLMProxyConfig(BaseModel):

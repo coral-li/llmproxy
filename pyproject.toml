@@ -48,8 +48,8 @@ dev = [
     "pytest-xdist",
     "black==26.3.1",
     "flake8==7.3.0",
-    "isort==6.1.0",
-    "mypy==1.8.0",
+    "isort==8.0.1",
+    "mypy==2.0.0",
     "types-PyYAML",
     "types-aiofiles",
     "pre-commit",
@@ -63,15 +63,15 @@ test = [
 lint = [
     "black==26.3.1",
     "flake8==7.3.0",
-    "isort==6.1.0",
-    "mypy==1.8.0",
+    "isort==8.0.1",
+    "mypy==2.0.0",
     "types-PyYAML",
     "types-aiofiles",
     "pre-commit",
 ]
 
 [tool.uv]
-exclude-newer = "5 days"
+exclude-newer = "7 days"
 
 [project.scripts]
 llmproxy = "llmproxy.cli:main"
@@ -142,7 +142,6 @@ module = [
     "redis.*",
     "hiredis.*",
     "structlog.*",
-    "traitlets.*",
     "trio.*",
     "anyio.*",
     "dotenv.*",
@@ -150,7 +149,6 @@ module = [
     "uvicorn.*",
     "websockets.*",
     "fastapi.*",
-    "orjson.*",
 ]
 ignore_missing_imports = true
 

@@ -1,3 +1,4 @@
+import json
 from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -6,6 +7,7 @@ from llmproxy.api.chat_completions import ChatCompletionHandler
 from llmproxy.api.embeddings import EmbeddingHandler
 from llmproxy.api.responses import ResponseHandler
 from llmproxy.clients.llm_client import LLMClient
+from llmproxy.config_model import DEFAULT_MAX_REQUEST_BODY_BYTES
 from llmproxy.core.cache_manager import CacheManager
 from llmproxy.core.logger import get_logger
 from llmproxy.managers.load_balancer import LoadBalancer
@@ -58,18 +60,20 @@ def create_router(
 
     @router.post("/chat/completions")
     async def chat_completions(request: Request) -> Any:
-        return await _handle_endpoint(request, get_chat_handler, _process_chat_request)
+        return await _handle_endpoint(
+            request, get_chat_handler, _process_chat_request, config
+        )
 
     @router.post("/responses")
     async def responses(request: Request) -> Any:
         return await _handle_endpoint(
-            request, get_response_handler, _process_response_request
+            request, get_response_handler, _process_response_request, config
         )
 
     @router.post("/embeddings")
     async def embeddings(request: Request) -> Any:
         return await _handle_endpoint(
-            request, get_embedding_handler, _process_embedding_request
+            request, get_embedding_handler, _process_embedding_request, config
         )
 
     return router
@@ -196,9 +200,13 @@ async def _handle_endpoint(
     request: Request,
     get_handler: Callable[[], Any],
     process_func: Callable[[Any, dict], Awaitable[Any]],
+    config_provider: Optional[Callable[[], Any]] = None,
 ) -> Any:
     try:
-        request_data = await request.json()
+        request_data = await _read_limited_json(
+            request,
+            max_body_bytes=_get_max_request_body_bytes(config_provider),
+        )
         handler = get_handler()
         return await process_func(handler, request_data)
     except HTTPException:
@@ -208,3 +216,58 @@ async def _handle_endpoint(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
         )
+
+
+def _get_max_request_body_bytes(
+    config_provider: Optional[Callable[[], Any]],
+) -> int:
+    if config_provider is None:
+        return DEFAULT_MAX_REQUEST_BODY_BYTES
+
+    config = config_provider()
+    settings = getattr(config, "general_settings", None)
+    return int(
+        getattr(
+            settings,
+            "max_request_body_bytes",
+            DEFAULT_MAX_REQUEST_BODY_BYTES,
+        )
+    )
+
+
+async def _read_limited_json(request: Request, max_body_bytes: int) -> dict:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > max_body_bytes:
+                raise _payload_too_large(max_body_bytes)
+        except ValueError:
+            pass
+
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > max_body_bytes:
+            raise _payload_too_large(max_body_bytes)
+
+    try:
+        parsed = json.loads(bytes(body))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Request body is not valid JSON",
+        ) from None
+
+    if not isinstance(parsed, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Request body must be a JSON object",
+        )
+    return parsed
+
+
+def _payload_too_large(max_body_bytes: int) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        detail=f"Request body exceeds maximum size of {max_body_bytes} bytes",
+    )

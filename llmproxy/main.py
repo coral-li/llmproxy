@@ -97,6 +97,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             ttl=cache_ttl,
             namespace="llmproxy",
             cache_enabled=config.general_settings.cache,
+            max_cache_entry_bytes=config.general_settings.max_cache_entry_bytes,
         )
         logger.info("cache_manager_initialized")
 
