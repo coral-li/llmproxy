@@ -78,11 +78,17 @@ class TestProxyLive:
 
         chunks = []
         chunk_count = 0
+        usage_chunks = 0
         for chunk in stream:
             chunk_count += 1
-            assert (
-                hasattr(chunk, "choices") and len(chunk.choices) > 0
-            ), "No choices or empty choices"
+
+            # A stream that reports usage ends with a usage-only chunk whose
+            # choices array is empty; it must reach the client intact.
+            if not chunk.choices:
+                assert chunk.usage is not None, "Empty choices without usage"
+                usage_chunks += 1
+                continue
+
             assert hasattr(chunk.choices[0], "delta"), "No delta in choices[0]"
 
             if (
@@ -90,6 +96,8 @@ class TestProxyLive:
                 and chunk.choices[0].delta.content
             ):
                 chunks.append(chunk.choices[0].delta.content)
+
+        assert usage_chunks == 1, "Expected exactly one usage chunk"
 
         duration = time.time() - start_time
         full_response = "".join(chunks)
@@ -318,6 +326,9 @@ class TestProxyLive:
 
         chunks1 = []
         for chunk in stream1:
+            # Skip the trailing usage-only chunk, which carries no choices.
+            if not chunk.choices:
+                continue
             if hasattr(chunk.choices[0], "delta") and hasattr(
                 chunk.choices[0].delta, "content"
             ):
@@ -344,6 +355,9 @@ class TestProxyLive:
 
         chunks2 = []
         for chunk in stream2:
+            # Skip the trailing usage-only chunk, which carries no choices.
+            if not chunk.choices:
+                continue
             if hasattr(chunk.choices[0], "delta") and hasattr(
                 chunk.choices[0].delta, "content"
             ):

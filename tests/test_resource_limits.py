@@ -7,6 +7,7 @@ from fastapi import HTTPException, Request
 
 from llmproxy.api.routes import _handle_endpoint, _read_limited_json
 from llmproxy.core.cache_manager import CacheManager
+from llmproxy.core.usage_telemetry import UsageRecorder
 
 
 class InMemoryRedis:
@@ -116,19 +117,24 @@ async def test_read_limited_json_rejects_chunked_body_over_limit():
     assert exc_info.value.status_code == 413
 
 
+def _stub_handler():
+    """Handler double carrying the inert recorder `_handle_endpoint` reads."""
+    return SimpleNamespace(usage_recorder=UsageRecorder(None, None))
+
+
 @pytest.mark.asyncio
 async def test_handle_endpoint_allows_under_limit_json_to_reach_handler():
     request = build_request([b'{"model": "gpt-4"}'])
     observed_request_data = None
 
-    async def process_func(handler, request_data):
+    async def process_func(handler, request_data, caller_headers=None):
         nonlocal observed_request_data
         observed_request_data = request_data
         return {"ok": True}
 
     response = await _handle_endpoint(
         request,
-        get_handler=lambda: object(),
+        get_handler=_stub_handler,
         process_func=process_func,
         config_provider=config_provider(1024),
     )
@@ -142,7 +148,7 @@ async def test_handle_endpoint_rejects_invalid_json_before_handler():
     request = build_request([b'{"model":'])
     handler_called = False
 
-    async def process_func(handler, request_data):
+    async def process_func(handler, request_data, caller_headers=None):
         nonlocal handler_called
         handler_called = True
         return {"ok": True}
@@ -150,7 +156,7 @@ async def test_handle_endpoint_rejects_invalid_json_before_handler():
     with pytest.raises(HTTPException) as exc_info:
         await _handle_endpoint(
             request,
-            get_handler=lambda: object(),
+            get_handler=_stub_handler,
             process_func=process_func,
             config_provider=config_provider(1024),
         )

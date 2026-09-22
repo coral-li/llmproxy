@@ -243,6 +243,22 @@ class MockOpenAIServer:
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
         }
         yield f"data: {json.dumps(chunk)}\n\n"
+
+        # Usage-only chunk, as sent when stream_options.include_usage is set.
+        # It carries an empty choices array, which the proxy must not filter.
+        usage_chunk = {
+            "id": "chatcmpl-mock123",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": len(content.split()),
+                "total_tokens": 10 + len(content.split()),
+            },
+        }
+        yield f"data: {json.dumps(usage_chunk)}\n\n"
         yield "data: [DONE]\n\n"
 
     async def _stream_responses_api(
@@ -284,6 +300,12 @@ class MockOpenAIServer:
                 "model": model,
                 "status": "completed",
                 "output": [{"type": "text", "text": content}],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": len(content.split()),
+                    "total_tokens": 10 + len(content.split()),
+                    "input_tokens_details": {"cached_tokens": 0},
+                },
             },
         }
         yield "event: response.done\n"
