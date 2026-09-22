@@ -44,6 +44,30 @@ class CacheParams(BaseModel):
     password: str
 
 
+class UsageStreamParams(BaseModel):
+    """Redis Stream sink for per-request usage telemetry.
+
+    Omitting the whole `usage_stream` block leaves telemetry off, so existing
+    deployments keep their current behaviour without touching their config.
+    """
+
+    enabled: bool = True
+    # Consumers read this key with a consumer group; see docs/usage-telemetry.md.
+    stream_key: str = "llmproxy:usage"
+    # Approximate cap (XADD MAXLEN ~) so a stalled consumer cannot grow the
+    # stream without bound. Redis trims to roughly this many entries.
+    max_len: int = Field(default=1_000_000, gt=0)
+    # Inbound request headers copied onto each record so a caller can attribute
+    # a request to the agent or workflow that issued it.
+    caller_headers: List[str] = Field(
+        default_factory=lambda: [
+            "x-coral-agent",
+            "x-coral-run-id",
+            "x-coral-feature",
+        ]
+    )
+
+
 class GeneralSettings(BaseModel):
     """General configuration settings"""
 
@@ -61,6 +85,7 @@ class GeneralSettings(BaseModel):
     redis_ssl_cert_reqs: Optional[str] = None  # Options: "required", "optional", "none"
     cache: bool = True
     cache_params: Optional[CacheParams] = None
+    usage_stream: Optional[UsageStreamParams] = None
     response_affinity_ttl: int = Field(default=21600, gt=0)
     max_request_body_bytes: int = Field(
         default=DEFAULT_MAX_REQUEST_BODY_BYTES,
