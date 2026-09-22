@@ -162,15 +162,18 @@ effort, which endpoint actually served, and cache-hit rate — enable the
 general_settings:
   usage_stream:
     enabled: True
-    stream_key: "llmproxy:usage"
+    stream_key: "llmproxy-telemetry:usage"
+    caller_headers:
+      - x-coral-agent
+      - x-coral-run-id
 ```
 
-Callers attribute their own traffic with headers (`X-Coral-Agent`,
-`X-Coral-Run-Id`, `X-Coral-Feature` by default). Telemetry is disabled when the
-block is absent, and a Redis failure never affects the proxied request.
+Callers attribute their own traffic with the request headers listed in
+`caller_headers`. Telemetry is disabled when the block is absent, and a Redis
+failure never affects the proxied request.
 
-See [docs/usage-telemetry.md](docs/usage-telemetry.md) for the record shape and
-a consumer-group example.
+See [docs/usage-telemetry.md](docs/usage-telemetry.md) for the record shape,
+how to size the stream, and how to consume it.
 
 ## Configuration Deep Dive
 

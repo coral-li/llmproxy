@@ -13,23 +13,31 @@ Telemetry is off unless `general_settings.usage_stream` is present.
 general_settings:
   usage_stream:
     enabled: True
-    stream_key: "llmproxy:usage"
-    max_len: 1000000
+    stream_key: "llmproxy-telemetry:usage"
+    max_len: 100000
     caller_headers:
       - x-coral-agent
       - x-coral-run-id
-      - x-coral-feature
 ```
 
 | Field | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Set to `false` to keep the block but stop emitting. |
-| `stream_key` | `llmproxy:usage` | Redis Stream key to append to. |
-| `max_len` | `1000000` | Approximate cap (`XADD MAXLEN ~`). Redis trims to roughly this many entries, so a stalled consumer cannot grow the stream without bound. |
-| `caller_headers` | the three above | Inbound request headers copied onto each record. Matched case-insensitively; values are trimmed to 256 characters. |
+| `stream_key` | `llmproxy-telemetry:usage` | Redis Stream key to append to. It may not start with `llmproxy:`: `DELETE /cache` removes every key under that prefix. |
+| `max_len` | `100000` | Approximate cap (`XADD MAXLEN ~`). See [sizing](#sizing). |
+| `caller_headers` | none | Inbound request headers copied onto each record. Matched case-insensitively; values are trimmed to 256 characters. |
 
 Writes are best effort. If Redis is unavailable the failure is logged as
 `usage_record_write_failed` and the proxied request is unaffected.
+
+### Sizing
+
+Redis never evicts a stream, and reading one does not shrink it, so the stream
+settles at about `max_len` entries and stays there. A record takes roughly
+0.75 KB, so the default holds about 75 MB. The cap is also how far a consumer
+can fall behind: entries trimmed before it reads them are lost. Size it to cover
+the longest consumer outage you want to survive, within what the Redis instance
+can spare.
 
 ## Caller attribution
 
@@ -84,26 +92,42 @@ Each stream entry has a single field, `payload`, holding a JSON object:
 
 Notes on individual fields:
 
+- `request_id` is unique per record, so a consumer can write records
+  idempotently.
 - `model_group` is what the caller asked for; `endpoint_model` and
-  `endpoint_id` are what actually served it. They differ whenever a model group
-  fans out across several deployments.
-- `attempts` counts endpoints tried for this request. A value above 1 means
-  failover occurred; `0` means the cache answered without any upstream call.
+  `endpoint_id` are the configured deployment the request was sent to. They
+  differ whenever a model group fans out across several deployments. Failures
+  name the endpoint too: when every endpoint failed, or none was left to try
+  after a failure, the record names the last one tried. They are `null` only
+  when no upstream call was made.
+- `attempts` counts endpoints tried. A value above 1 means failover occurred;
+  `0` means no upstream call was made, because the cache answered or no
+  endpoint was available.
+- `status_code` is the status the caller received. Streams, which have already
+  answered 200 when they end, record one of three instead when they do not
+  finish cleanly: `499` when the client went away, `500` when the stream
+  raised, and `502` when the upstream reported a failure inside the stream.
 - `cache_hit` marks a replayed response. The `usage` on those rows is what the
   cached body reported, not tokens billed again — **price only rows where
   `cache_hit` is false**, and use the cache-hit rows to quantify what the cache
   saved.
-- `usage` is `null` when the upstream never reported it: failed requests, and
-  chat streams from clients that did not set `stream_options.include_usage`.
+- `usage` is `null` when the upstream never reported it: most failed requests,
+  and chat streams from clients that did not set `stream_options.include_usage`.
 - `reasoning_effort` is read from `reasoning.effort` (Responses) or
-  `reasoning_effort` (Chat Completions), and is `null` when unset.
-- `error` is present only on failures, truncated to 500 characters.
+  `reasoning_effort` (Chat Completions). It is `null` when unset, and when the
+  value is not a short lowercase word.
+- `error` is present only on failures, as a short code rather than text: the
+  provider's error code or type when it sends one (`content_filter`),
+  `http_<status>` when it does not, the proxy's own (`no_available_endpoints`,
+  `all_endpoints_failed`), or an exception class name.
 
-Prompt and response content is never recorded — only counts and labels.
+Prompt and response content is never recorded — only counts and labels. That
+is why `error` is a code: upstream error bodies can quote the request back.
 
 ## Consuming the stream
 
-Use a consumer group so records survive a consumer restart:
+Read the stream with `XRANGE` from a position you store alongside the records
+you write, and advance it in the same database transaction:
 
 ```python
 import json
@@ -111,19 +135,32 @@ import redis
 
 client = redis.Redis(host="localhost", port=6379, decode_responses=True)
 
-try:
-    client.xgroup_create("llmproxy:usage", "ingest", id="0", mkstream=True)
-except redis.ResponseError:
-    pass  # group already exists
 
-entries = client.xreadgroup("ingest", "worker-1", {"llmproxy:usage": ">"}, count=500)
-for _stream, messages in entries:
-    for entry_id, fields in messages:
-        record = json.loads(fields["payload"])
-        ...  # persist it
-        client.xack("llmproxy:usage", "ingest", entry_id)
+def next_id(entry_id: str) -> str:
+    # XRANGE's exclusive "(" prefix needs Redis 6.2; this works on 5.0 and up.
+    milliseconds, sequence = entry_id.split("-")
+    return f"{milliseconds}-{int(sequence) + 1}"
+
+
+with transaction():  # your database's
+    position = load_position("llmproxy-telemetry:usage")  # "0-0" at first
+    entries = client.xrange(
+        "llmproxy-telemetry:usage", min=next_id(position), max="+", count=500
+    )
+    for _entry_id, fields in entries:
+        store(json.loads(fields["payload"]))  # idempotent on request_id
+    if entries:
+        save_position("llmproxy-telemetry:usage", entries[-1][0])
 ```
 
-Because `max_len` trims the stream, a consumer that stays down long enough will
-lose the oldest records. Size `max_len` to comfortably cover your worst expected
-consumer outage.
+Keeping the position with the data makes the consumer restartable without
+losing or double-counting records, and it rewinds with the data: a database
+reset or a restore from backup simply re-reads whatever the stream still holds.
+Reading does not modify the stream, so several independent consumers can read
+it side by side.
+
+A consumer group also works, but its position lives in Redis rather than with
+the data, so a database rewound past it cannot re-read what the group already
+delivered. Acknowledging an entry does not delete it, and recovering entries a
+crashed consumer left pending needs `XAUTOCLAIM` (Redis 6.2+) or a re-read of
+the consumer's own pending list.
