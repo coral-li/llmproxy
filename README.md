@@ -151,6 +151,27 @@ vector = embeddings.data[0].embedding
 - `GET /stats`: live per-endpoint statistics pulled from Redis.
 - `DELETE /cache`: invalidate cached responses (useful for testing).
 
+### Usage Telemetry
+
+`/stats` reports live endpoint health, which expires with the endpoint state
+TTL. For durable per-request accounting — token counts, cost inputs, reasoning
+effort, which endpoint actually served, and cache-hit rate — enable the
+`usage_stream` block to append one record per request to a Redis Stream:
+
+```yaml
+general_settings:
+  usage_stream:
+    enabled: True
+    stream_key: "llmproxy:usage"
+```
+
+Callers attribute their own traffic with headers (`X-Coral-Agent`,
+`X-Coral-Run-Id`, `X-Coral-Feature` by default). Telemetry is disabled when the
+block is absent, and a Redis failure never affects the proxied request.
+
+See [docs/usage-telemetry.md](docs/usage-telemetry.md) for the record shape and
+a consumer-group example.
+
 ## Configuration Deep Dive
 
 `llmproxy/config_model.py` defines the schema enforced at load time. Highlights:
