@@ -221,6 +221,33 @@ def test_reconstruct_responses_stream_handles_response_done_chunks():
     assert outputs and outputs[0].get("id") == "msg_original"
 
 
+def test_replayed_responses_stream_keeps_the_original_usage():
+    """A cache hit still reports what the call it replays consumed."""
+    cache_manager = CacheManager(redis.Redis(), cache_enabled=False)
+    writer = StreamingCacheWriter(cache_manager, {}, is_responses_api=True)
+    usage = {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150}
+    completed = {
+        "type": "response.completed",
+        "response": {"id": "resp_1", "model": "gpt-5", "output": [], "usage": usage},
+    }
+
+    normalized = writer._parse_responses_event(
+        f"event: response.completed\ndata: {json.dumps(completed)}\n\n"
+    )
+    assert normalized is not None
+    reconstructed = cache_manager._reconstruct_responses_stream([normalized.to_dict()])
+
+    data_events = [
+        json.loads(line[len("data: ") :].strip())
+        for line in reconstructed
+        if line.startswith("data: ")
+    ]
+    completed_event = next(
+        event for event in data_events if event.get("type") == "response.completed"
+    )
+    assert completed_event["response"]["usage"] == usage
+
+
 def test_completed_outputs_preserve_encrypted_content():
     """Completed outputs should preserve encrypted reasoning content for cache replay."""
     cache_manager = CacheManager(redis.Redis(), cache_enabled=False)

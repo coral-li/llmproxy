@@ -214,6 +214,9 @@ class _ResponsesStreamRebuilder:
         if "status_details" in metadata:
             response_payload["status_details"] = metadata.get("status_details")
 
+        if "usage" in metadata:
+            response_payload["usage"] = metadata["usage"]
+
         event_payload = {
             "type": "response.completed",
             "response": response_payload,
@@ -1197,6 +1200,10 @@ class StreamingCacheWriter:
 
         if "status_details" in response:
             metadata["status_details"] = response.get("status_details")
+
+        # Kept so a replayed stream still reports what the original call used.
+        if isinstance(response.get("usage"), dict):
+            metadata["usage"] = response["usage"]
 
         return EventAwareChunk(
             event_type="response.completed",
