@@ -11,7 +11,7 @@ from llmproxy.config_model import LLMProxyConfig
 from llmproxy.core.cache_manager import CacheManager
 from llmproxy.core.logger import get_logger
 from llmproxy.core.response_affinity import ResponseAffinityManager
-from llmproxy.core.usage_telemetry import UsageRecorder, current_usage_context
+from llmproxy.core.usage_telemetry import UsageRecorder
 from llmproxy.managers.load_balancer import LoadBalancer
 from llmproxy.models.endpoint import Endpoint
 
@@ -41,43 +41,18 @@ class ResponseHandler(BaseRequestHandler):
         )
         self.response_affinity_manager = response_affinity_manager
 
-    async def _check_cache(
-        self, request_data: dict, is_streaming: bool, start_time: float, model: str
-    ) -> Optional[Union[Dict[Any, Any], StreamingResponse]]:
-        """Check cache for existing response and refresh affinity when needed."""
-        if not self._is_cache_enabled(request_data):
-            return None
-
-        if is_streaming:
-            cached_chunks = await self.cache_manager.get_streaming(request_data)
-            if cached_chunks:
-                # Per-request, not on the handler: handlers are singletons
-                # shared by concurrent requests.
-                context = current_usage_context.get()
-                if context is not None:
-                    context.cached_chunks = cached_chunks
-                return await self._build_cached_streaming_response(
-                    cached_chunks, request_data, start_time, model
-                )
+    async def _on_cached_response(
+        self, cached_response: dict, request_data: dict, model: str
+    ) -> None:
+        """Refresh affinity so a follow-up to a cached response is routed back."""
+        endpoint_id = await self.cache_manager.get_affinity(request_data)
+        if endpoint_id:
+            await self._record_affinity_from_response_data(cached_response, endpoint_id)
         else:
-            cached_response = await self.cache_manager.get(request_data)
-            if cached_response:
-                cached_response["_proxy_cache_hit"] = True
-                cached_response["_proxy_latency_ms"] = int(
-                    (time.time() - start_time) * 1000
-                )
-                endpoint_id = await self.cache_manager.get_affinity(request_data)
-                if endpoint_id:
-                    await self._record_affinity_from_response_data(
-                        cached_response, endpoint_id
-                    )
-                else:
-                    logger.debug(
-                        "cached_response_missing_affinity",
-                        model=model,
-                    )
-                return cached_response
-        return None
+            logger.debug(
+                "cached_response_missing_affinity",
+                model=model,
+            )
 
     async def _build_cached_streaming_response(
         self,
@@ -251,25 +226,21 @@ class ResponseHandler(BaseRequestHandler):
         is_streaming = request_data.get("stream", False)
         last_response = None
 
+        # The affinity path retries one pinned endpoint, so the attempt index is
+        # the attempt count.
         for attempt in range(self.config.general_settings.num_retries):
             try:
-                response = await self._make_request(
-                    endpoint, request_data, is_streaming
+                response = self._stamp_attempt(
+                    await self._make_request(endpoint, request_data, is_streaming),
+                    endpoint,
+                    attempt + 1,
                 )
-                # The affinity path retries one pinned endpoint, so the attempt
-                # index is the attempt count.
-                response["attempts"] = attempt + 1
                 if is_streaming and response.get("status_code") == 200:
                     return await self._build_streaming_response(
                         endpoint, request_data, response
                     )
                 if response["status_code"] == 200:
                     await self.load_balancer.record_success(endpoint)
-                    response["endpoint_base_url"] = endpoint.params.get(
-                        "base_url", "https://api.openai.com"
-                    )
-                    response["endpoint_id"] = endpoint.id
-                    response["endpoint_model"] = endpoint.model
                     return response
                 last_response = await self._handle_error_response(
                     endpoint,
@@ -280,14 +251,14 @@ class ResponseHandler(BaseRequestHandler):
                     is_streaming,
                 )
             except Exception as exc:
-                last_response = await self._handle_exception(
-                    endpoint, exc, is_streaming
+                last_response = self._stamp_attempt(
+                    await self._handle_exception(endpoint, exc, is_streaming),
+                    endpoint,
+                    attempt + 1,
                 )
-                last_response["attempts"] = attempt + 1
 
-        return last_response or self._all_endpoints_failed_response(
-            self.config.general_settings.num_retries
-        )
+        # Only reachable with retries configured to zero: nothing was tried.
+        return last_response or self._all_endpoints_failed_response(attempts=0)
 
     async def _resolve_affinity_endpoint(
         self, model_group: str, request_data: dict

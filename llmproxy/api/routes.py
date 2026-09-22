@@ -1,5 +1,5 @@
 import json
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException, Request, status
 
@@ -112,7 +112,7 @@ def _create_chat_handler(
         cache_manager=cm,
         llm_client=lc,
         config=cfg,
-        usage_recorder=_resolve_usage_recorder(usage_recorder),
+        usage_recorder=usage_recorder() if usage_recorder is not None else None,
     )
 
 
@@ -149,7 +149,7 @@ def _create_response_handler(
         llm_client=lc,
         config=cfg,
         response_affinity_manager=ram,
-        usage_recorder=_resolve_usage_recorder(usage_recorder),
+        usage_recorder=usage_recorder() if usage_recorder is not None else None,
     )
 
 
@@ -183,47 +183,38 @@ def _create_embedding_handler(
         cache_manager=cm,
         llm_client=lc,
         config=cfg,
-        usage_recorder=_resolve_usage_recorder(usage_recorder),
+        usage_recorder=usage_recorder() if usage_recorder is not None else None,
     )
-
-
-def _resolve_usage_recorder(
-    usage_recorder: Optional[Callable[[], UsageRecorder]],
-) -> UsageRecorder:
-    """Return the configured recorder, or an inert one when telemetry is off."""
-    if usage_recorder is None:
-        return UsageRecorder(None, None)
-    return usage_recorder()
 
 
 async def _process_chat_request(
     handler: ChatCompletionHandler,
     request_data: dict,
-    caller_headers: Optional[Dict[str, str]] = None,
+    request_headers: Mapping[str, str],
 ) -> Any:
-    return await handler.handle_request(request_data, caller_headers)
+    return await handler.handle_request(request_data, request_headers)
 
 
 async def _process_response_request(
     handler: ResponseHandler,
     request_data: dict,
-    caller_headers: Optional[Dict[str, str]] = None,
+    request_headers: Mapping[str, str],
 ) -> Any:
-    return await handler.handle_request(request_data, caller_headers)
+    return await handler.handle_request(request_data, request_headers)
 
 
 async def _process_embedding_request(
     handler: EmbeddingHandler,
     request_data: dict,
-    caller_headers: Optional[Dict[str, str]] = None,
+    request_headers: Mapping[str, str],
 ) -> Any:
-    return await handler.handle_request(request_data, caller_headers)
+    return await handler.handle_request(request_data, request_headers)
 
 
 async def _handle_endpoint(
     request: Request,
     get_handler: Callable[[], Any],
-    process_func: Callable[..., Awaitable[Any]],
+    process_func: Callable[[Any, dict, Mapping[str, str]], Awaitable[Any]],
     config_provider: Optional[Callable[[], Any]] = None,
 ) -> Any:
     try:
@@ -232,10 +223,7 @@ async def _handle_endpoint(
             max_body_bytes=_get_max_request_body_bytes(config_provider),
         )
         handler = get_handler()
-        # The recorder decides which headers are worth keeping; when telemetry
-        # is off this returns an empty mapping and costs nothing.
-        caller_headers = handler.usage_recorder.caller_headers(request.headers)
-        return await process_func(handler, request_data, caller_headers)
+        return await process_func(handler, request_data, request.headers)
     except HTTPException:
         raise
     except Exception as e:

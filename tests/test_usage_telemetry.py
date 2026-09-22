@@ -1,33 +1,70 @@
 """Tests for per-request usage telemetry."""
 
+import asyncio
 import json
+import random
+import string
+import time
 import uuid
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 import redis as sync_redis
 import requests
-from fastapi.responses import StreamingResponse
+from fastapi import HTTPException
+from pydantic import ValidationError
 
+from llmproxy.api.chat_completions import ChatCompletionHandler
+from llmproxy.api.embeddings import EmbeddingHandler
+from llmproxy.api.responses import ResponseHandler
 from llmproxy.clients.llm_client import LLMClient
-from llmproxy.config_model import UsageStreamParams
+from llmproxy.config_model import GeneralSettings, LLMProxyConfig, UsageStreamParams
+from llmproxy.core import usage_telemetry
 from llmproxy.core.usage_telemetry import (
+    ServedBy,
     StreamUsageObserver,
     UsageContext,
     UsageRecorder,
+    error_code,
     extract_caller_headers,
     extract_reasoning_effort,
     normalize_usage,
 )
 from llmproxy.models.endpoint import Endpoint
 
+#: Every field a record carries; `error` is added only when the call failed.
+RECORD_FIELDS = {
+    "request_id",
+    "recorded_at",
+    "api_surface",
+    "model_group",
+    "endpoint_model",
+    "endpoint_id",
+    "endpoint_base_url",
+    "streaming",
+    "reasoning_effort",
+    "status_code",
+    "cache_hit",
+    "attempts",
+    "latency_ms",
+    "caller",
+    "usage",
+}
+
+CHAT_USAGE_CHUNK = (
+    'data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":3}}\n\n'
+)
+
 
 class FakeRedis:
-    """Minimal stand-in capturing XADD calls."""
+    """Minimal stand-in capturing XADD calls, optionally failing some of them."""
 
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(self, fail_first: int = 0) -> None:
         self.entries: List[Dict[str, Any]] = []
-        self.fail = fail
+        self.fail_first = fail_first
+        self.calls = 0
 
     async def xadd(
         self,
@@ -36,7 +73,8 @@ class FakeRedis:
         maxlen: Optional[int] = None,
         approximate: bool = True,
     ) -> str:
-        if self.fail:
+        self.calls += 1
+        if self.calls <= self.fail_first:
             raise ConnectionError("redis is down")
         self.entries.append(
             {
@@ -46,16 +84,15 @@ class FakeRedis:
                 "approximate": approximate,
             }
         )
-        return "1-0"
+        return f"{self.calls}-0"
 
     def records(self) -> List[dict]:
         return [json.loads(entry["fields"]["payload"]) for entry in self.entries]
 
 
-def make_recorder(fail: bool = False) -> tuple:
-    redis = FakeRedis(fail=fail)
-    recorder = UsageRecorder(redis, UsageStreamParams())
-    return recorder, redis
+def make_recorder(redis: Optional[FakeRedis] = None, **params: Any) -> tuple:
+    redis = redis or FakeRedis()
+    return UsageRecorder(redis, UsageStreamParams(**params)), redis
 
 
 def make_context(**overrides: Any) -> UsageContext:
@@ -66,6 +103,63 @@ def make_context(**overrides: Any) -> UsageContext:
     }
     defaults.update(overrides)
     return UsageContext(**defaults)
+
+
+def make_endpoint(host: str, model: str = "m") -> Endpoint:
+    return Endpoint(model=model, weight=1, params={"base_url": f"https://{host}"})
+
+
+def make_handler(
+    handler_class: Callable[..., Any] = ChatCompletionHandler,
+    *,
+    endpoints: tuple = (),
+    cache: bool = False,
+    retries: int = 3,
+    caller_headers: tuple = (),
+) -> tuple:
+    """A real handler over mocked dependencies, recording into a fake stream."""
+    recorder, redis = make_recorder(caller_headers=list(caller_headers))
+    load_balancer = AsyncMock()
+    load_balancer.get_model_groups = lambda: ["m"]
+    load_balancer.endpoint_configs = {"m": list(endpoints)}
+    cache_manager = AsyncMock()
+    cache_manager._should_cache = lambda _request: cache
+    cache_manager.get.return_value = None
+    cache_manager.get_streaming.return_value = None
+    llm_client = AsyncMock()
+    config = LLMProxyConfig(
+        general_settings=GeneralSettings(
+            bind_port=5000,
+            redis_host="localhost",
+            redis_port=6379,
+            redis_password="",
+            num_retries=retries,
+            cache=cache,
+        ),
+        model_groups=[],
+    )
+    extra = (
+        {"response_affinity_manager": AsyncMock()}
+        if handler_class is ResponseHandler
+        else {}
+    )
+    handler = handler_class(
+        load_balancer=load_balancer,
+        cache_manager=cache_manager,
+        llm_client=llm_client,
+        config=config,
+        usage_recorder=recorder,
+        **extra,
+    )
+    return handler, load_balancer, cache_manager, llm_client, recorder, redis
+
+
+def upstream_error(status_code: int, body: str) -> dict:
+    return {"status_code": status_code, "error": body, "headers": {}, "data": None}
+
+
+async def drain(stream: AsyncIterator[Any]) -> List[Any]:
+    return [chunk async for chunk in stream]
 
 
 class TestNormalizeUsage:
@@ -102,6 +196,7 @@ class TestNormalizeUsage:
                 }
             }
         )
+        assert usage is not None
         assert usage["input_tokens"] == 12
         assert usage["output_tokens"] == 8
         assert usage["cached_tokens"] == 4
@@ -139,6 +234,21 @@ class TestNormalizeUsage:
         assert usage["input_tokens"] == 0
         assert usage["output_tokens"] == 0
 
+    def test_non_finite_counts_degrade_to_zero(self):
+        """`json.loads` decodes 1e999 to inf and NaN to nan; neither may raise."""
+        hostile = json.loads(
+            '{"usage": {"prompt_tokens": 1e999, "completion_tokens": NaN}}'
+        )
+        usage = normalize_usage(hostile)
+        assert usage is not None
+        assert usage["input_tokens"] == 0
+        assert usage["output_tokens"] == 0
+
+    def test_absurd_token_counts_are_clamped(self):
+        usage = normalize_usage({"usage": {"prompt_tokens": 10**40}})
+        assert usage is not None
+        assert usage["input_tokens"] == 2**63 - 1
+
 
 class TestReasoningEffort:
     def test_responses_api_nested_effort(self):
@@ -153,6 +263,13 @@ class TestReasoningEffort:
     )
     def test_absent_effort(self, request_data):
         assert extract_reasoning_effort(request_data) is None
+
+    @pytest.mark.parametrize(
+        "effort", ["\u0000", "HIGH", "high; drop", "x" * 17, "\ud800", 3]
+    )
+    def test_a_value_that_is_not_an_effort_is_dropped(self, effort):
+        """The value is caller-controlled and lands in a label column."""
+        assert extract_reasoning_effort({"reasoning_effort": effort}) is None
 
 
 class TestCallerHeaders:
@@ -176,6 +293,31 @@ class TestCallerHeaders:
         assert len(collected["x-coral-agent"]) == 256
 
 
+class TestErrorCode:
+    def test_reads_the_code_from_an_error_body(self):
+        body = '{"error": {"code": "content_filter", "message": "Prompt: secret"}}'
+        assert error_code(body) == "content_filter"
+
+    def test_falls_back_to_the_error_type(self):
+        assert error_code({"error": {"type": "invalid_request_error"}}) == (
+            "invalid_request_error"
+        )
+
+    @pytest.mark.parametrize(
+        "detail",
+        [
+            None,
+            "Internal server error",
+            b"\xff not json",
+            '{"error": "a bare string"}',
+            '{"error": {"code": "has spaces and; punctuation"}}',
+            '{"error": {"code": 429}}',
+        ],
+    )
+    def test_anything_else_yields_no_code(self, detail):
+        assert error_code(detail) is None
+
+
 class TestStreamUsageObserver:
     def test_captures_responses_completed_event(self):
         observer = StreamUsageObserver()
@@ -187,17 +329,13 @@ class TestStreamUsageObserver:
         )
         assert observer.usage is not None
         assert observer.usage["input_tokens"] == 11
-        assert observer.endpoint_model == "gpt-5"
+        assert observer.error is None
 
     def test_captures_chat_usage_chunk(self):
         observer = StreamUsageObserver()
-        observer.observe(
-            'data: {"model":"gpt-4.1","choices":[],'
-            '"usage":{"prompt_tokens":7,"completion_tokens":2}}\n\n'
-        )
+        observer.observe(CHAT_USAGE_CHUNK)
         assert observer.usage is not None
-        assert observer.usage["input_tokens"] == 7
-        assert observer.endpoint_model == "gpt-4.1"
+        assert observer.usage["input_tokens"] == 11
 
     def test_ignores_done_sentinel_and_malformed_json(self):
         observer = StreamUsageObserver()
@@ -212,43 +350,86 @@ class TestStreamUsageObserver:
         assert observer.usage is not None
         assert observer.usage["input_tokens"] == 99
 
+    @pytest.mark.parametrize(
+        "chunk, expected",
+        [
+            (
+                'data: {"error":{"message":"overloaded","code":"server_error"}}\n\n',
+                "server_error",
+            ),
+            (
+                'data: {"type":"response.failed","response":'
+                '{"error":{"code":"rate_limit_exceeded","message":"slow down"}}}\n\n',
+                "rate_limit_exceeded",
+            ),
+            ('data: {"type":"response.failed","response":{}}\n\n', "response_failed"),
+            ('data: {"type":"error","message":"boom"}\n\n', "error"),
+        ],
+    )
+    def test_captures_a_failure_reported_inside_the_stream(self, chunk, expected):
+        observer = StreamUsageObserver()
+        observer.observe(chunk)
+        assert observer.error == expected
+
+    def test_a_null_error_field_is_not_a_failure(self):
+        observer = StreamUsageObserver()
+        observer.observe(
+            'data: {"type":"response.created","response":{"error":null}}\n\n'
+        )
+        assert observer.error is None
+
+
+class TestUsageStreamParams:
+    def test_defaults_keep_the_stream_out_of_the_response_cache(self):
+        params = UsageStreamParams()
+        assert params.stream_key == "llmproxy-telemetry:usage"
+        assert params.max_len == 100_000
+        assert params.caller_headers == []
+
+    def test_rejects_a_stream_key_inside_the_response_cache(self):
+        """Clearing the cache deletes everything under `llmproxy:`."""
+        with pytest.raises(ValidationError):
+            UsageStreamParams(stream_key="llmproxy:usage")
+
 
 class TestUsageRecorder:
-    @pytest.mark.asyncio
-    async def test_disabled_without_params(self):
+    def test_disabled_without_params(self):
         recorder = UsageRecorder(FakeRedis(), None)
         assert recorder.enabled is False
-        recorder.record(make_context(), status_code=200)
+        recorder.record(make_context(), status_code=200, attempts=1)
 
     @pytest.mark.asyncio
     async def test_disabled_when_flag_off(self):
         redis = FakeRedis()
         recorder = UsageRecorder(redis, UsageStreamParams(enabled=False))
-        recorder.record(make_context(), status_code=200)
+        recorder.record(make_context(), status_code=200, attempts=1)
         await recorder.flush()
         assert redis.entries == []
+
+    def test_caller_headers_empty_when_disabled(self):
+        recorder = UsageRecorder.disabled()
+        assert recorder.caller_headers({"x-coral-agent": "a"}) == {}
 
     @pytest.mark.asyncio
     async def test_writes_record_with_endpoint_and_usage(self):
         recorder, redis = make_recorder()
-        endpoint = Endpoint(
-            model="gpt-5",
-            weight=1,
-            params={"base_url": "https://example.openai.azure.com", "api_key": "k"},
-        )
         recorder.record(
             make_context(caller={"x-coral-agent": "classifier"}),
             status_code=200,
-            endpoint=endpoint,
-            usage={"input_tokens": 3, "output_tokens": 1},
             attempts=2,
+            served_by=ServedBy(
+                endpoint_model="gpt-5",
+                endpoint_id="e1",
+                endpoint_base_url="https://example.openai.azure.com",
+            ),
+            usage={"input_tokens": 3, "output_tokens": 1},
         )
 
         await recorder.flush()
         (record,) = redis.records()
         assert record["model_group"] == "gpt-5"
         assert record["endpoint_model"] == "gpt-5"
-        assert record["endpoint_id"] == endpoint.id
+        assert record["endpoint_id"] == "e1"
         assert record["endpoint_base_url"] == "https://example.openai.azure.com"
         assert record["caller"] == {"x-coral-agent": "classifier"}
         assert record["usage"]["input_tokens"] == 3
@@ -258,9 +439,21 @@ class TestUsageRecorder:
         assert isinstance(record["latency_ms"], int)
 
     @pytest.mark.asyncio
+    async def test_record_carries_exactly_the_documented_fields(self):
+        """Consumers parse these by name; a rename must fail here, not there."""
+        recorder, redis = make_recorder()
+        recorder.record(make_context(), status_code=200, attempts=1)
+        recorder.record(make_context(), status_code=503, attempts=0, error="x")
+        await recorder.flush()
+
+        succeeded, failed = redis.records()
+        assert set(succeeded) == RECORD_FIELDS
+        assert set(failed) == RECORD_FIELDS | {"error"}
+
+    @pytest.mark.asyncio
     async def test_applies_stream_bounds(self):
         recorder, redis = make_recorder()
-        recorder.record(make_context(), status_code=200)
+        recorder.record(make_context(), status_code=200, attempts=1)
         await recorder.flush()
         entry = redis.entries[0]
         assert entry["stream_key"] == "llmproxy-telemetry:usage"
@@ -268,34 +461,468 @@ class TestUsageRecorder:
         assert entry["approximate"] is True
 
     @pytest.mark.asyncio
-    async def test_redis_failure_is_swallowed(self):
-        """Telemetry must never turn a healthy proxied request into an error."""
-        recorder, _ = make_recorder(fail=True)
-        recorder.record(make_context(), status_code=200)
-
-    @pytest.mark.asyncio
-    async def test_error_is_truncated(self):
+    async def test_error_label_is_bounded(self):
         recorder, redis = make_recorder()
-        recorder.record(make_context(), status_code=500, error="x" * 5000)
+        recorder.record(make_context(), status_code=500, attempts=1, error="x" * 5000)
         await recorder.flush()
         (record,) = redis.records()
-        assert len(record["error"]) == 500
+        assert len(record["error"]) == 128
 
-    def test_build_context_reads_request(self):
-        recorder, _ = make_recorder()
-        context = recorder.build_context(
+    @pytest.mark.asyncio
+    async def test_a_failed_write_does_not_stop_later_records(self):
+        """Telemetry must never turn a healthy proxied request into an error."""
+        recorder, redis = make_recorder(FakeRedis(fail_first=1))
+        recorder.record(make_context(), status_code=200, attempts=1)
+        recorder.record(make_context(), status_code=201, attempts=1)
+        await recorder.flush()
+        assert [record["status_code"] for record in redis.records()] == [201]
+
+    @pytest.mark.asyncio
+    async def test_a_saturated_queue_drops_records_without_raising(self, monkeypatch):
+        monkeypatch.setattr(usage_telemetry, "_WRITE_QUEUE_SIZE", 1)
+        release = asyncio.Event()
+
+        class SlowRedis(FakeRedis):
+            async def xadd(self, *args: Any, **kwargs: Any) -> str:
+                await release.wait()
+                return await super().xadd(*args, **kwargs)
+
+        recorder, redis = make_recorder(SlowRedis())
+        for status_code in (200, 201, 202):
+            recorder.record(make_context(), status_code=status_code, attempts=1)
+        release.set()
+        await recorder.flush()
+        assert [record["status_code"] for record in redis.records()] == [200]
+
+    @pytest.mark.asyncio
+    async def test_aclose_writes_what_is_queued(self):
+        recorder, redis = make_recorder()
+        for _ in range(5):
+            recorder.record(make_context(), status_code=200, attempts=1)
+        await recorder.aclose()
+        assert len(redis.records()) == 5
+
+    @pytest.mark.asyncio
+    async def test_records_after_close_are_dropped(self):
+        recorder, redis = make_recorder()
+        await recorder.aclose()
+        recorder.record(make_context(), status_code=200, attempts=1)
+        await recorder.flush()
+        assert redis.records() == []
+
+    def test_context_reads_the_request(self):
+        context = UsageContext.from_request(
             api_surface="responses",
             model_group="gpt-5",
             request_data={"stream": True, "reasoning": {"effort": "high"}},
             caller={"x-coral-agent": "a"},
+            start_time=time.time(),
         )
         assert context.streaming is True
         assert context.reasoning_effort == "high"
         assert context.caller == {"x-coral-agent": "a"}
 
-    def test_caller_headers_empty_when_disabled(self):
-        recorder = UsageRecorder(None, None)
-        assert recorder.caller_headers({"x-coral-agent": "a"}) == {}
+
+class TestStreamObservation:
+    """One record per stream, written when it ends however it ends."""
+
+    SERVED_BY = ServedBy(endpoint_model="gpt-4.1", endpoint_id="e1")
+
+    def observe(self, recorder: UsageRecorder, source: AsyncIterator[Any]) -> Any:
+        return recorder.observe_stream(
+            source,
+            make_context(api_surface="chat", streaming=True),
+            attempts=1,
+            served_by=self.SERVED_BY,
+        )
+
+    @pytest.mark.asyncio
+    async def test_records_usage_once_the_stream_completes(self):
+        recorder, redis = make_recorder()
+
+        async def source() -> AsyncIterator[bytes]:
+            yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            yield CHAT_USAGE_CHUNK.encode()
+            yield b"data: [DONE]\n\n"
+
+        chunks = await drain(self.observe(recorder, source()))
+        assert len(chunks) == 3
+        assert all(isinstance(chunk, bytes) for chunk in chunks)
+
+        await recorder.flush()
+        (record,) = redis.records()
+        assert record["usage"]["input_tokens"] == 11
+        assert record["status_code"] == 200
+        assert record["streaming"] is True
+        assert record["endpoint_id"] == "e1"
+        assert "error" not in record
+
+    @pytest.mark.asyncio
+    async def test_a_stream_that_raises_records_partial_usage_as_a_failure(self):
+        recorder, redis = make_recorder()
+
+        async def source() -> AsyncIterator[str]:
+            yield CHAT_USAGE_CHUNK
+            raise RuntimeError("upstream dropped the connection")
+
+        with pytest.raises(RuntimeError):
+            await drain(self.observe(recorder, source()))
+
+        await recorder.flush()
+        (record,) = redis.records()
+        assert record["status_code"] == 500
+        assert record["usage"]["input_tokens"] == 11
+        # The exception class, never its message.
+        assert record["error"] == "RuntimeError"
+
+    @pytest.mark.asyncio
+    async def test_a_closed_stream_records_a_client_abort(self):
+        recorder, redis = make_recorder()
+
+        async def source() -> AsyncIterator[str]:
+            yield 'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
+            yield CHAT_USAGE_CHUNK
+
+        wrapped = self.observe(recorder, source())
+        async for _ in wrapped:
+            break
+        await wrapped.aclose()
+        await recorder.flush()
+
+        (record,) = redis.records()
+        # 499: the consumer went away, the upstream did not fail.
+        assert record["status_code"] == 499
+        assert record["error"] == "GeneratorExit"
+
+    @pytest.mark.asyncio
+    async def test_a_disconnect_under_a_cancelled_scope_is_recorded(self):
+        """A disconnect cancels the scope, where any await in `finally` raises."""
+        recorder, redis = make_recorder()
+        never = asyncio.Event()
+
+        async def source() -> AsyncIterator[str]:
+            yield 'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
+            await never.wait()
+            yield "unreachable"
+
+        wrapped = self.observe(recorder, source())
+
+        async def consume() -> None:
+            await drain(wrapped)
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(consume)
+            await asyncio.sleep(0.01)
+            task_group.cancel_scope.cancel()
+
+        await recorder.flush()
+        (record,) = redis.records()
+        assert record["status_code"] == 499
+        assert record["error"] == "CancelledError"
+
+    @pytest.mark.asyncio
+    async def test_a_failure_reported_inside_the_stream_is_not_a_success(self):
+        recorder, redis = make_recorder()
+
+        async def source() -> AsyncIterator[str]:
+            yield 'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
+            yield 'data: {"error":{"code":"server_error","message":"at token 9"}}\n\n'
+
+        await drain(self.observe(recorder, source()))
+        await recorder.flush()
+
+        (record,) = redis.records()
+        assert record["status_code"] == 502
+        assert record["error"] == "server_error"
+
+    @pytest.mark.parametrize(
+        "recorder, context",
+        [
+            pytest.param(UsageRecorder.disabled(), make_context(), id="disabled"),
+            pytest.param(make_recorder()[0], None, id="no-request-context"),
+        ],
+    )
+    def test_the_stream_is_passed_through_untouched(self, recorder, context):
+        async def source() -> AsyncIterator[str]:
+            yield "data: x\n\n"
+
+        original = source()
+        wrapped = recorder.observe_stream(
+            original, context, attempts=1, served_by=ServedBy()
+        )
+        assert wrapped is original
+
+
+class TestAttemptsAndEndpointReporting:
+    """What a request records about failover, driven through `handle_request`."""
+
+    @pytest.mark.asyncio
+    async def test_success_after_failover_names_the_endpoint_that_served(self):
+        first, second = make_endpoint("a"), make_endpoint("b")
+        handler, load_balancer, _cache, client, recorder, redis = make_handler(
+            endpoints=(first, second)
+        )
+        load_balancer.select_endpoint.side_effect = [first, second]
+        client.create_chat_completion.side_effect = [
+            upstream_error(500, "boom"),
+            {
+                "status_code": 200,
+                "headers": {},
+                "data": {"choices": [], "usage": {"prompt_tokens": 4}},
+            },
+        ]
+
+        await handler.handle_request({"model": "m", "messages": []})
+        await recorder.flush()
+
+        (record,) = redis.records()
+        assert record["status_code"] == 200
+        assert record["attempts"] == 2
+        assert record["endpoint_id"] == second.id
+        assert record["endpoint_base_url"] == "https://b"
+        assert record["usage"]["input_tokens"] == 4
+
+    @pytest.mark.asyncio
+    async def test_no_endpoint_available_records_zero_attempts(self):
+        handler, load_balancer, *_, recorder, redis = make_handler()
+        load_balancer.select_endpoint.return_value = None
+
+        with pytest.raises(HTTPException) as raised:
+            await handler.handle_request({"model": "m", "messages": []})
+
+        assert raised.value.status_code == 503
+        await recorder.flush()
+        (record,) = redis.records()
+        assert record["status_code"] == 503
+        assert record["attempts"] == 0
+        assert record["error"] == "no_available_endpoints"
+        assert record["endpoint_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_running_out_of_endpoints_after_a_failure_keeps_the_attempt(self):
+        failed = make_endpoint("a")
+        handler, load_balancer, _cache, client, recorder, redis = make_handler(
+            endpoints=(failed, make_endpoint("b"), make_endpoint("c"))
+        )
+        # The one tried endpoint fails, and the rest are cooling down.
+        load_balancer.select_endpoint.side_effect = [failed, None]
+        client.create_chat_completion.return_value = upstream_error(500, "boom")
+
+        with pytest.raises(HTTPException) as raised:
+            await handler.handle_request({"model": "m", "messages": []})
+
+        assert raised.value.status_code == 503
+        await recorder.flush()
+        (record,) = redis.records()
+        assert record["attempts"] == 1
+        assert record["endpoint_id"] == failed.id
+        assert record["error"] == "http_500"
+
+    @pytest.mark.asyncio
+    async def test_an_upstream_failure_records_its_code_not_its_text(self):
+        endpoints = (make_endpoint("a"), make_endpoint("b"), make_endpoint("c"))
+        handler, load_balancer, _cache, client, recorder, redis = make_handler(
+            endpoints=endpoints
+        )
+        load_balancer.select_endpoint.side_effect = list(endpoints)
+        client.create_chat_completion.return_value = upstream_error(
+            400,
+            '{"error": {"code": "content_filter", "message": "Prompt: Jane Doe"}}',
+        )
+
+        with pytest.raises(HTTPException):
+            await handler.handle_request({"model": "m", "messages": []})
+
+        await recorder.flush()
+        (record,) = redis.records()
+        assert record["status_code"] == 400
+        assert record["attempts"] == 3
+        assert record["error"] == "content_filter"
+        assert "Jane Doe" not in json.dumps(record)
+
+    @pytest.mark.asyncio
+    async def test_exhaustion_is_attributed_to_the_last_endpoint_tried(self):
+        """With one endpoint per group every upstream failure ends this way."""
+        only = make_endpoint("a")
+        handler, load_balancer, _cache, client, recorder, redis = make_handler(
+            endpoints=(only,)
+        )
+        load_balancer.select_endpoint.return_value = only
+        client.create_chat_completion.return_value = upstream_error(429, "slow down")
+
+        with pytest.raises(HTTPException) as raised:
+            await handler.handle_request({"model": "m", "messages": []})
+
+        assert raised.value.status_code == 503
+        await recorder.flush()
+        (record,) = redis.records()
+        assert record["status_code"] == 503
+        assert record["attempts"] == 1
+        assert record["endpoint_base_url"] == "https://a"
+        assert record["error"] == "http_429"
+
+    @pytest.mark.asyncio
+    async def test_a_streaming_request_that_cannot_connect_is_recorded(self):
+        endpoint = make_endpoint("a")
+        handler, load_balancer, _cache, client, recorder, redis = make_handler(
+            endpoints=(endpoint,), retries=1
+        )
+        load_balancer.select_endpoint.return_value = endpoint
+        client.create_chat_completion.side_effect = RuntimeError("connect failed")
+
+        with pytest.raises(HTTPException) as raised:
+            await handler.handle_request({"model": "m", "messages": [], "stream": True})
+
+        assert raised.value.status_code == 500
+
+        await recorder.flush()
+        (record,) = redis.records()
+        assert record["status_code"] == 500
+        assert record["attempts"] == 1
+        assert record["error"] == "RuntimeError"
+
+    @pytest.mark.asyncio
+    async def test_hostile_usage_cannot_fail_a_healthy_request(self):
+        endpoint = make_endpoint("a")
+        handler, load_balancer, _cache, client, recorder, redis = make_handler(
+            endpoints=(endpoint,)
+        )
+        load_balancer.select_endpoint.return_value = endpoint
+        client.create_chat_completion.return_value = {
+            "status_code": 200,
+            "headers": {},
+            "data": json.loads('{"choices": [], "usage": {"prompt_tokens": 1e999}}'),
+        }
+
+        body = await handler.handle_request({"model": "m", "messages": []})
+
+        assert body["choices"] == []
+        await recorder.flush()
+        (record,) = redis.records()
+        assert record["usage"]["input_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_caller_headers_are_read_from_the_request(self):
+        endpoint = make_endpoint("a")
+        handler, load_balancer, _cache, client, recorder, redis = make_handler(
+            endpoints=(endpoint,), caller_headers=("x-coral-agent",)
+        )
+        load_balancer.select_endpoint.return_value = endpoint
+        client.create_chat_completion.return_value = {
+            "status_code": 200,
+            "headers": {},
+            "data": {"choices": []},
+        }
+
+        await handler.handle_request(
+            {"model": "m", "messages": []}, {"X-Coral-Agent": "classifier"}
+        )
+        await recorder.flush()
+
+        (record,) = redis.records()
+        assert record["caller"] == {"x-coral-agent": "classifier"}
+
+    @pytest.mark.asyncio
+    async def test_embeddings_record_their_surface(self):
+        endpoint = make_endpoint("a")
+        handler, load_balancer, _cache, client, recorder, redis = make_handler(
+            EmbeddingHandler, endpoints=(endpoint,)
+        )
+        load_balancer.select_endpoint.return_value = endpoint
+        client.create_embedding.return_value = {
+            "status_code": 200,
+            "headers": {},
+            "data": {"data": [], "usage": {"prompt_tokens": 9, "total_tokens": 9}},
+        }
+
+        await handler.handle_request({"model": "m", "input": "x"})
+        await recorder.flush()
+
+        (record,) = redis.records()
+        assert record["api_surface"] == "embeddings"
+        assert record["usage"]["input_tokens"] == 9
+        assert record["endpoint_id"] == endpoint.id
+
+    @pytest.mark.asyncio
+    async def test_a_responses_stream_records_the_configured_model(self):
+        """Upstreams report a dated snapshot; the record keeps the deployment."""
+        endpoint = make_endpoint("a", model="gpt-5")
+        handler, load_balancer, _cache, client, recorder, redis = make_handler(
+            ResponseHandler, endpoints=(endpoint,)
+        )
+        load_balancer.select_endpoint.return_value = endpoint
+
+        async def upstream() -> AsyncIterator[str]:
+            yield "event: response.completed\n"
+            yield (
+                'data: {"type":"response.completed","response":'
+                '{"model":"gpt-5-2025-08-07",'
+                '"usage":{"input_tokens":21,"output_tokens":5}}}\n\n'
+            )
+
+        client.create_response.return_value = upstream()
+
+        response = await handler.handle_request(
+            {"model": "m", "input": "hi", "stream": True}
+        )
+        await drain(response.body_iterator)
+        await recorder.flush()
+
+        (record,) = redis.records()
+        assert record["api_surface"] == "responses"
+        assert record["usage"]["input_tokens"] == 21
+        assert record["endpoint_model"] == "gpt-5"
+
+
+class TestCacheHitRecording:
+    @pytest.mark.asyncio
+    async def test_a_streamed_hit_reports_what_the_cache_saved(self):
+        handler, _lb, cache_manager, _client, recorder, redis = make_handler(cache=True)
+        cache_manager.get_streaming.return_value = [
+            CHAT_USAGE_CHUNK,
+            "data: [DONE]\n\n",
+        ]
+
+        response = await handler.handle_request(
+            {"model": "m", "messages": [], "stream": True}
+        )
+        await drain(response.body_iterator)
+        await recorder.flush()
+
+        (record,) = redis.records()
+        assert record["cache_hit"] is True
+        assert record["attempts"] == 0
+        assert record["usage"]["input_tokens"] == 11
+
+    @pytest.mark.asyncio
+    async def test_a_hit_reports_the_cached_usage(self):
+        handler, _lb, cache_manager, _client, recorder, redis = make_handler(cache=True)
+        cache_manager.get.return_value = {"choices": [], "usage": {"prompt_tokens": 7}}
+
+        await handler.handle_request({"model": "m", "messages": []})
+        await recorder.flush()
+
+        (record,) = redis.records()
+        assert record["cache_hit"] is True
+        assert record["attempts"] == 0
+        assert record["endpoint_id"] is None
+        assert record["usage"]["input_tokens"] == 7
+
+    @pytest.mark.asyncio
+    async def test_a_responses_hit_is_recorded_once(self):
+        handler, _lb, cache_manager, _client, recorder, redis = make_handler(
+            ResponseHandler, cache=True
+        )
+        cache_manager.get.return_value = {"output": [], "usage": {"input_tokens": 5}}
+        cache_manager.get_affinity.return_value = None
+
+        await handler.handle_request({"model": "m", "input": "hi"})
+        await recorder.flush()
+
+        (record,) = redis.records()
+        assert record["api_surface"] == "responses"
+        assert record["cache_hit"] is True
+        assert record["usage"]["input_tokens"] == 5
 
 
 class TestUsageChunkForwarding:
@@ -317,88 +944,6 @@ class TestUsageChunkForwarding:
         assert client._filter_and_yield_chunk(line) == []
 
 
-class TestStreamObservationInHandler:
-    """The handler wrapper must record once the stream drains, and pass bytes through."""
-
-    @pytest.mark.asyncio
-    async def test_records_after_stream_completes(self):
-        from llmproxy.api.chat_completions import ChatCompletionHandler
-        from llmproxy.core.usage_telemetry import current_usage_context
-
-        recorder, redis = make_recorder()
-        handler = ChatCompletionHandler.__new__(ChatCompletionHandler)
-        handler.usage_recorder = recorder
-
-        endpoint = Endpoint(model="gpt-4.1", weight=1, params={"api_key": "k"})
-        context = make_context(api_surface="chat", streaming=True)
-        current_usage_context.set(context)
-
-        async def source() -> AsyncIterator[bytes]:
-            yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
-            yield (
-                b'data: {"choices":[],"usage":'
-                b'{"prompt_tokens":6,"completion_tokens":2}}\n\n'
-            )
-            yield b"data: [DONE]\n\n"
-
-        wrapped = handler._observe_stream_usage(source(), endpoint, {"attempts": 1})
-
-        chunks = [chunk async for chunk in wrapped]
-        assert len(chunks) == 3
-        assert all(isinstance(chunk, bytes) for chunk in chunks)
-
-        await recorder.flush()
-        (record,) = redis.records()
-        assert record["usage"]["input_tokens"] == 6
-        assert record["usage"]["output_tokens"] == 2
-        assert record["status_code"] == 200
-        assert record["streaming"] is True
-
-    @pytest.mark.asyncio
-    async def test_records_partial_usage_when_stream_fails(self):
-        from llmproxy.api.chat_completions import ChatCompletionHandler
-        from llmproxy.core.usage_telemetry import current_usage_context
-
-        recorder, redis = make_recorder()
-        handler = ChatCompletionHandler.__new__(ChatCompletionHandler)
-        handler.usage_recorder = recorder
-
-        endpoint = Endpoint(model="gpt-4.1", weight=1, params={"api_key": "k"})
-        current_usage_context.set(make_context(api_surface="chat", streaming=True))
-
-        async def failing_source() -> AsyncIterator[str]:
-            yield 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
-            raise RuntimeError("upstream dropped")
-
-        wrapped = handler._observe_stream_usage(
-            failing_source(), endpoint, {"attempts": 1}
-        )
-
-        with pytest.raises(RuntimeError):
-            async for _ in wrapped:
-                pass
-
-        await recorder.flush()
-        (record,) = redis.records()
-        assert record["status_code"] == 500
-        assert record["error"] == "RuntimeError: upstream dropped"
-
-    @pytest.mark.asyncio
-    async def test_stream_untouched_when_telemetry_disabled(self):
-        from llmproxy.api.chat_completions import ChatCompletionHandler
-
-        handler = ChatCompletionHandler.__new__(ChatCompletionHandler)
-        handler.usage_recorder = UsageRecorder(None, None)
-
-        endpoint = Endpoint(model="gpt-4.1", weight=1, params={"api_key": "k"})
-
-        async def source() -> AsyncIterator[str]:
-            yield "data: x\n\n"
-
-        original = source()
-        assert handler._observe_stream_usage(original, endpoint, {}) is original
-
-
 # ---------------------------------------------------------------------------
 # End-to-end: a real request through the running proxy must land in the stream.
 # ---------------------------------------------------------------------------
@@ -406,28 +951,42 @@ class TestStreamObservationInHandler:
 TEST_STREAM_KEY = "llmproxy-telemetry:test:usage"
 
 
-def read_records_for_agent(agent: str, limit: int = 2000) -> List[dict]:
-    """Return usage records emitted for one agent label."""
+def wait_for_records(
+    matches: Callable[[dict], bool], expected: int, timeout: float = 5.0
+) -> List[dict]:
+    """Return the records matching one test's request, once all have landed.
+
+    Records are written by a background task after the response is sent, so
+    reading once straight after the request would race it.
+    """
     client = sync_redis.Redis(host="localhost", port=6379, decode_responses=True)
+    deadline = time.monotonic() + timeout
     try:
-        entries = client.xrevrange(TEST_STREAM_KEY, count=limit)
+        while True:
+            entries = client.xrevrange(TEST_STREAM_KEY, count=500)
+            records = [
+                record
+                for record in (json.loads(fields["payload"]) for _, fields in entries)
+                if matches(record)
+            ]
+            if len(records) >= expected or time.monotonic() > deadline:
+                return records
+            time.sleep(0.05)
     finally:
         client.close()
 
-    records = []
-    for _entry_id, fields in entries:
-        try:
-            record = json.loads(fields["payload"])
-        except (KeyError, json.JSONDecodeError):
-            continue
-        if record.get("caller", {}).get("x-coral-agent") == agent:
-            records.append(record)
-    return records
+
+def labelled(agent: str) -> Callable[[dict], bool]:
+    return lambda record: record.get("caller", {}).get("x-coral-agent") == agent
+
+
+def unique_agent() -> str:
+    return f"agent-{uuid.uuid4().hex[:8]}"
 
 
 class TestUsageTelemetryEndToEnd:
     def test_non_streaming_request_is_recorded(self, proxy_url, model):
-        agent = f"agent-{uuid.uuid4().hex[:8]}"
+        agent = unique_agent()
 
         response = requests.post(
             f"{proxy_url}/chat/completions",
@@ -442,7 +1001,7 @@ class TestUsageTelemetryEndToEnd:
         )
         assert response.status_code == 200
 
-        records = read_records_for_agent(agent)
+        records = wait_for_records(labelled(agent), expected=1)
         assert len(records) == 1, f"expected one record, got {records}"
         record = records[0]
 
@@ -461,7 +1020,7 @@ class TestUsageTelemetryEndToEnd:
         assert record["latency_ms"] >= 0
 
     def test_streaming_request_records_usage_from_final_chunk(self, proxy_url, model):
-        agent = f"agent-{uuid.uuid4().hex[:8]}"
+        agent = unique_agent()
 
         with requests.post(
             f"{proxy_url}/chat/completions",
@@ -480,7 +1039,7 @@ class TestUsageTelemetryEndToEnd:
 
         assert "[DONE]" in body
 
-        records = read_records_for_agent(agent)
+        records = wait_for_records(labelled(agent), expected=1)
         assert len(records) == 1, f"expected one record, got {records}"
         record = records[0]
 
@@ -492,7 +1051,7 @@ class TestUsageTelemetryEndToEnd:
         assert record["usage"]["output_tokens"] > 0
 
     def test_cache_hit_is_recorded_separately(self, proxy_url, model):
-        agent = f"agent-{uuid.uuid4().hex[:8]}"
+        agent = unique_agent()
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": f"cache me {agent}"}],
@@ -515,128 +1074,37 @@ class TestUsageTelemetryEndToEnd:
         assert second.status_code == 200
         assert second.json().get("_proxy_cache_hit") is True
 
-        records = read_records_for_agent(agent)
+        records = wait_for_records(labelled(agent), expected=2)
         assert len(records) == 2
 
         cache_hits = [record for record in records if record["cache_hit"]]
         assert len(cache_hits) == 1
-        # A replayed response consumed no upstream call, so no endpoint is named.
+        # A replayed response consumed no upstream call, so no endpoint is named,
+        # but it still reports the usage the cache saved.
         assert cache_hits[0]["attempts"] == 0
         assert cache_hits[0]["endpoint_id"] is None
+        assert cache_hits[0]["usage"]["input_tokens"] == 10
 
     def test_request_without_headers_still_recorded(self, proxy_url, model):
         """Attribution is optional; an unlabelled call must still be counted."""
-        marker = f"unlabelled {uuid.uuid4().hex[:8]}"
+        # The effort is the one request field a record carries, so a unique one
+        # identifies this request's record among everyone else's.
+        marker = "".join(random.choices(string.ascii_lowercase, k=16))
         response = requests.post(
             f"{proxy_url}/chat/completions",
             json={
                 "model": model,
-                "messages": [{"role": "user", "content": marker}],
+                "messages": [{"role": "user", "content": "unlabelled"}],
+                "reasoning_effort": marker,
                 "cache": {"no-cache": True},
             },
             timeout=30,
         )
         assert response.status_code == 200
 
-        client = sync_redis.Redis(host="localhost", port=6379, decode_responses=True)
-        try:
-            entries = client.xrevrange(TEST_STREAM_KEY, count=50)
-        finally:
-            client.close()
-
-        unlabelled = [
-            json.loads(fields["payload"])
-            for _entry_id, fields in entries
-            if json.loads(fields["payload"]).get("caller") == {}
-        ]
-        assert unlabelled, "expected at least one record without caller headers"
-
-
-class TestAuditFixes:
-    """Regression cover for defects the audit found."""
-
-    @pytest.mark.asyncio
-    async def test_client_disconnect_is_still_recorded(self):
-        """Starlette cancels the scope; an awaited write would be dropped."""
-        from llmproxy.api.chat_completions import ChatCompletionHandler
-        from llmproxy.core.usage_telemetry import current_usage_context
-
-        recorder, redis = make_recorder()
-        handler = ChatCompletionHandler.__new__(ChatCompletionHandler)
-        handler.usage_recorder = recorder
-        endpoint = Endpoint(model="gpt-4.1", weight=1, params={"api_key": "k"})
-        current_usage_context.set(make_context(api_surface="chat", streaming=True))
-
-        async def source():
-            yield 'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
-            yield 'data: {"choices":[],"usage":{"prompt_tokens":4}}\n\n'
-
-        wrapped = handler._observe_stream_usage(source(), endpoint, {"attempts": 1})
-        async for _ in wrapped:
-            break
-        await wrapped.aclose()
-        await recorder.flush()
-
-        (record,) = redis.records()
-        # 499: the consumer went away, the upstream did not fail.
-        assert record["status_code"] == 499
-        assert "GeneratorExit" in record["error"]
-
-    @pytest.mark.asyncio
-    async def test_telemetry_cannot_fail_a_healthy_request(self):
-        """json.loads decodes 1e999 to inf, and int() used to raise on it."""
-        from llmproxy.api.chat_completions import ChatCompletionHandler
-
-        recorder, redis = make_recorder()
-        handler = ChatCompletionHandler.__new__(ChatCompletionHandler)
-        handler.usage_recorder = recorder
-        context = make_context()
-
-        hostile = json.loads(
-            '{"usage": {"prompt_tokens": 1e999, ' '"completion_tokens": NaN}}'
+        records = wait_for_records(
+            lambda record: record.get("reasoning_effort") == marker, expected=1
         )
-        handler._record_completed_response(
-            context, {"status_code": 200, "data": hostile}
-        )
-        await recorder.flush()
-
-        (record,) = redis.records()
-        assert record["status_code"] == 200
-        assert record["usage"]["input_tokens"] == 0
-
-    @pytest.mark.asyncio
-    async def test_exhaustion_records_the_real_attempt_count(self):
-        from llmproxy.api.chat_completions import ChatCompletionHandler
-
-        handler = ChatCompletionHandler.__new__(ChatCompletionHandler)
-        exhausted = handler._all_endpoints_failed_response(2)
-        none_available = handler._no_endpoint_response("m")
-
-        assert exhausted["attempts"] == 2
-        # Nothing was tried, so reporting 1 would invent an upstream call.
-        assert none_available["attempts"] == 0
-
-    @pytest.mark.asyncio
-    async def test_streamed_cache_hit_reports_what_the_cache_saved(self):
-        from llmproxy.api.chat_completions import ChatCompletionHandler
-
-        recorder, redis = make_recorder()
-        handler = ChatCompletionHandler.__new__(ChatCompletionHandler)
-        handler.usage_recorder = recorder
-        context = make_context(streaming=True)
-        context.cached_chunks = [
-            'data: {"choices":[],"usage":{"prompt_tokens":11,'
-            '"completion_tokens":3}}\n\n'
-        ]
-
-        handler._record_cache_hit(context, StreamingResponse(iter([])))
-        await recorder.flush()
-
-        (record,) = redis.records()
-        assert record["cache_hit"] is True
-        assert record["usage"]["input_tokens"] == 11
-
-    def test_absurd_token_counts_are_clamped_not_stored(self):
-        usage = normalize_usage({"usage": {"prompt_tokens": 10**40}})
-        assert usage is not None
-        assert usage["input_tokens"] <= 2**63 - 1
+        assert len(records) == 1
+        assert records[0]["caller"] == {}
+        assert records[0]["api_surface"] == "chat"

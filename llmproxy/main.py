@@ -327,8 +327,10 @@ def get_config_required() -> Any:
 
 
 def get_usage_recorder_required() -> UsageRecorder:
-    """Get the usage recorder, falling back to an inert one."""
-    return usage_recorder or UsageRecorder(None, None)
+    """Get usage recorder with validation."""
+    if usage_recorder is None:
+        raise HTTPException(status_code=503, detail="Usage recorder not initialized")
+    return usage_recorder
 
 
 def get_response_affinity_manager_required() -> ResponseAffinityManager:
