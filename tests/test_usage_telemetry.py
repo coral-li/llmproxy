@@ -263,8 +263,8 @@ class TestUsageRecorder:
         recorder.record(make_context(), status_code=200)
         await recorder.flush()
         entry = redis.entries[0]
-        assert entry["stream_key"] == "llmproxy:usage"
-        assert entry["maxlen"] == 1_000_000
+        assert entry["stream_key"] == "llmproxy-telemetry:usage"
+        assert entry["maxlen"] == 100_000
         assert entry["approximate"] is True
 
     @pytest.mark.asyncio
@@ -403,7 +403,7 @@ class TestStreamObservationInHandler:
 # End-to-end: a real request through the running proxy must land in the stream.
 # ---------------------------------------------------------------------------
 
-TEST_STREAM_KEY = "llmproxy:test:usage"
+TEST_STREAM_KEY = "llmproxy-telemetry:test:usage"
 
 
 def read_records_for_agent(agent: str, limit: int = 2000) -> List[dict]:

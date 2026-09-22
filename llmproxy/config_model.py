@@ -1,9 +1,12 @@
 from typing import List, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 DEFAULT_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024
 DEFAULT_MAX_CACHE_ENTRY_BYTES = 64 * 1024 * 1024
+#: Prefix of every response-cache key. `DELETE /cache` removes everything under
+#: it, so nothing that has to survive a cache clear may be stored there.
+RESPONSE_CACHE_NAMESPACE = "llmproxy"
 
 
 class ModelConfig(BaseModel):
@@ -52,20 +55,26 @@ class UsageStreamParams(BaseModel):
     """
 
     enabled: bool = True
-    # Consumers read this key with a consumer group; see docs/usage-telemetry.md.
-    stream_key: str = "llmproxy:usage"
-    # Approximate cap (XADD MAXLEN ~) so a stalled consumer cannot grow the
-    # stream without bound. Redis trims to roughly this many entries.
-    max_len: int = Field(default=1_000_000, gt=0)
+    # Consumers read this key from a position they track themselves; see
+    # docs/usage-telemetry.md.
+    stream_key: str = "llmproxy-telemetry:usage"
+    # Approximate cap (XADD MAXLEN ~). Redis never evicts a stream and reading
+    # one does not shrink it, so the stream settles at about this many entries:
+    # at roughly 0.75 KB each, the default holds about 75 MB.
+    max_len: int = Field(default=100_000, gt=0)
     # Inbound request headers copied onto each record so a caller can attribute
     # a request to the agent or workflow that issued it.
-    caller_headers: List[str] = Field(
-        default_factory=lambda: [
-            "x-coral-agent",
-            "x-coral-run-id",
-            "x-coral-feature",
-        ]
-    )
+    caller_headers: List[str] = Field(default_factory=list)
+
+    @field_validator("stream_key")
+    @classmethod
+    def _outside_response_cache(cls, stream_key: str) -> str:
+        if stream_key.startswith(f"{RESPONSE_CACHE_NAMESPACE}:"):
+            raise ValueError(
+                f"stream_key must not start with '{RESPONSE_CACHE_NAMESPACE}:', "
+                "where clearing the response cache would delete it"
+            )
+        return stream_key
 
 
 class GeneralSettings(BaseModel):

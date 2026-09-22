@@ -44,5 +44,8 @@ general_settings:
 
   usage_stream:
     enabled: true
-    stream_key: "llmproxy:test:usage"
+    stream_key: "llmproxy-telemetry:test:usage"
     max_len: 1000
+    caller_headers:
+      - x-coral-agent
+      - x-coral-run-id

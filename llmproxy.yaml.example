@@ -74,15 +74,14 @@ general_settings:
   # Responses API affinity mapping TTL (seconds)
   response_affinity_ttl: 21600 # 6 hours
 
-  # Per-request usage telemetry. Omit this block entirely to disable it.
-  # Records are appended to a Redis Stream; see docs/usage-telemetry.md for the
-  # record shape and how to consume it.
-  usage_stream:
-    enabled: True
-    stream_key: "llmproxy:usage"
-    max_len: 1000000 # approximate cap so a stalled consumer cannot grow it without bound
-    # Inbound headers copied onto each record for caller attribution.
-    caller_headers:
-      - x-coral-agent
-      - x-coral-run-id
-      - x-coral-feature
+  # Per-request usage telemetry, off while this block is absent. Records are
+  # appended to a Redis Stream; see docs/usage-telemetry.md for the record shape
+  # and how to consume it.
+  # usage_stream:
+  #   enabled: True
+  #   stream_key: "llmproxy-telemetry:usage"
+  #   max_len: 100000 # approximate cap; at ~0.75 KB per entry, about 75 MB
+  #   # Inbound headers copied onto each record for caller attribution.
+  #   caller_headers:
+  #     - x-coral-agent
+  #     - x-coral-run-id
