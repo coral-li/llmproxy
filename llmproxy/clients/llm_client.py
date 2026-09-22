@@ -466,6 +466,12 @@ class LLMClient:
                 if chunk_data is None or not isinstance(chunk_data, dict):
                     return []
                 if "choices" in chunk_data and len(chunk_data["choices"]) == 0:
+                    # The final chunk of a `stream_options.include_usage` stream
+                    # carries the token counts with an empty choices array;
+                    # dropping it would discard the only usage report the Chat
+                    # Completions stream ever sends.
+                    if isinstance(chunk_data.get("usage"), dict):
+                        return [line + "\n\n"]
                     logger.debug("Filtering out chunk with empty choices array")
                     return []
                 if "choices" in chunk_data and len(chunk_data["choices"]) > 0:

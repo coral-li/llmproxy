@@ -8,6 +8,8 @@ logger = get_logger(__name__)
 class ChatCompletionHandler(BaseRequestHandler):
     """Handles chat completion requests with load balancing, caching, and retries"""
 
+    api_surface = "chat"
+
     async def _make_request(
         self, endpoint: Endpoint, request_data: dict, is_streaming: bool
     ) -> dict:

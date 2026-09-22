@@ -8,6 +8,8 @@ logger = get_logger(__name__)
 class EmbeddingHandler(BaseRequestHandler):
     """Handles embedding requests with load balancing, caching, and retries"""
 
+    api_surface = "embeddings"
+
     async def _make_request(
         self, endpoint: Endpoint, request_data: dict, is_streaming: bool = False
     ) -> dict:
