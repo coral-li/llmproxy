@@ -329,6 +329,28 @@ class TestUsageStreamParams:
         custom = general_settings(cache_params=cache_config(namespace="responses"))
         assert custom.cache_namespace == "responses"
 
+    @pytest.mark.parametrize(
+        "header",
+        [
+            "Authorization",
+            "proxy-authorization",
+            "cookie",
+            "x-api-key",
+            "api_key",
+            "x-auth-token",
+            "x-client-secret",
+            "x-password",
+        ],
+    )
+    def test_rejects_a_caller_header_that_carries_credentials(self, header):
+        """The stream keeps a caller header for as long as it keeps the record."""
+        with pytest.raises(ValidationError):
+            UsageStreamParams(caller_headers=["x-coral-agent", header])
+
+    def test_accepts_attribution_headers(self):
+        headers = ["x-coral-agent", "x-coral-run-id"]
+        assert UsageStreamParams(caller_headers=headers).caller_headers == headers
+
     def test_the_stream_is_kept_out_of_a_configured_namespace(self):
         with pytest.raises(ValidationError):
             general_settings(

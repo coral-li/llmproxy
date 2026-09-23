@@ -29,7 +29,7 @@ general_settings:
 | `enabled` | `true` | Set to `false` to keep the block but stop emitting. |
 | `stream_key` | `llmproxy-telemetry:usage` | Redis Stream key to append to. It must stay outside the cache namespace (`cache_params.namespace`, default `llmproxy`): `DELETE /cache` removes every key under it. |
 | `max_len` | `100000` | Approximate cap (`XADD MAXLEN ~`). See [sizing](#sizing). |
-| `caller_headers` | none | Inbound request headers copied onto each record. Matched case-insensitively; values are trimmed to 256 characters. |
+| `caller_headers` | none | Inbound request headers copied onto each record. Matched case-insensitively; values are trimmed to 256 characters. A name that suggests a credential (`authorization`, `cookie`, an API key, a token, a secret or a password) is rejected at load time, because the stream keeps the value as long as the record. |
 
 Writes are best effort. If Redis is unavailable the failure is logged as
 `usage_record_write_failed` and the proxied request is unaffected.

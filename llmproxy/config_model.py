@@ -1,6 +1,7 @@
+import re
 from typing import List, Optional, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 DEFAULT_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024
 DEFAULT_MAX_CACHE_ENTRY_BYTES = 64 * 1024 * 1024
@@ -8,6 +9,11 @@ DEFAULT_MAX_CACHE_ENTRY_BYTES = 64 * 1024 * 1024
 #: /cache` removes everything under the configured prefix, so nothing that has
 #: to survive a cache clear may be stored there.
 RESPONSE_CACHE_NAMESPACE = "llmproxy"
+#: Header names that carry credentials. A caller header is kept in the usage
+#: stream for as long as its record is, so none of these may be listed.
+_CREDENTIAL_HEADER = re.compile(
+    r"authorization|cookie|api[-_]?key|token|secret|password", re.IGNORECASE
+)
 
 
 class ModelConfig(BaseModel):
@@ -67,6 +73,17 @@ class UsageStreamParams(BaseModel):
     # Inbound request headers copied onto each record so a caller can attribute
     # a request to the agent or workflow that issued it.
     caller_headers: List[str] = Field(default_factory=list)
+
+    @field_validator("caller_headers")
+    @classmethod
+    def _no_credential_headers(cls, names: List[str]) -> List[str]:
+        credentials = [name for name in names if _CREDENTIAL_HEADER.search(name)]
+        if credentials:
+            raise ValueError(
+                "usage_stream.caller_headers must not list a header that carries "
+                f"credentials, which the stream would keep: {', '.join(credentials)}"
+            )
+        return names
 
 
 class GeneralSettings(BaseModel):

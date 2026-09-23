@@ -169,8 +169,9 @@ general_settings:
 ```
 
 Callers attribute their own traffic with the request headers listed in
-`caller_headers`. Telemetry is disabled when the block is absent, and a Redis
-failure never affects the proxied request.
+`caller_headers`; headers that carry credentials cannot be listed. Telemetry is
+disabled when the block is absent, and a Redis failure never affects the
+proxied request.
 
 See [docs/usage-telemetry.md](docs/usage-telemetry.md) for the record shape,
 how to size the stream, and how to consume it.
