@@ -8,6 +8,9 @@ from llmproxy.core.logger import get_logger
 
 logger = get_logger(__name__)
 
+#: Where requests go for an endpoint configured without a `base_url`.
+DEFAULT_BASE_URL = "https://api.openai.com"
+
 
 class EndpointStatus(Enum):
     """Endpoint health status"""
@@ -34,6 +37,16 @@ class Endpoint:
             self.base_url, str
         ), f"base_url must be a string but is a {type(self.base_url)}"
         self.is_azure = is_azure_host(self.base_url)
+
+    @property
+    def upstream_base_url(self) -> str:
+        """The URL requests to this endpoint are sent to.
+
+        Distinct from `base_url`, whose `openai` fallback labels the endpoint
+        in logs and stats and feeds its id.
+        """
+        base_url: str = self.params.get("base_url", DEFAULT_BASE_URL)
+        return base_url
 
     def _generate_deterministic_id(self, model: str, params: dict) -> str:
         """Generate a deterministic ID based on model and key parameters"""

@@ -17,7 +17,7 @@ class EmbeddingHandler(BaseRequestHandler):
         # Embeddings are never streamed, so is_streaming is ignored.
 
         # Extract endpoint parameters
-        base_url = endpoint.params.get("base_url", "https://api.openai.com")
+        base_url = endpoint.upstream_base_url
 
         # Create a copy of request data, filter proxy params, and update the model name
         filtered_data = self._filter_proxy_params(request_data)

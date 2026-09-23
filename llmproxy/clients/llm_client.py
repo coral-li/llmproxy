@@ -38,7 +38,7 @@ class LLMClient:
         """Make chat completion request using an Endpoint object."""
 
         api_key = endpoint.params.get("api_key", "")
-        base_url = endpoint.params.get("base_url", "https://api.openai.com")
+        base_url = endpoint.upstream_base_url
         default_query = endpoint.params.get("default_query")
 
         # Prepare headers
@@ -80,7 +80,7 @@ class LLMClient:
         """Make embedding request using an Endpoint object."""
 
         api_key = endpoint.params.get("api_key", "")
-        base_url = endpoint.params.get("base_url", "https://api.openai.com")
+        base_url = endpoint.upstream_base_url
         default_query = endpoint.params.get("default_query")
 
         # Prepare headers
@@ -500,7 +500,7 @@ class LLMClient:
         """Make response API request using an Endpoint object."""
 
         api_key = endpoint.params.get("api_key", "")
-        base_url = endpoint.params.get("base_url", "https://api.openai.com")
+        base_url = endpoint.upstream_base_url
         default_query = endpoint.params.get("default_query")
 
         # Prepare headers

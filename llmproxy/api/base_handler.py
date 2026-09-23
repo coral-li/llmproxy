@@ -35,23 +35,15 @@ from llmproxy.models.endpoint import Endpoint
 
 logger = get_logger(__name__)
 
-#: Base URL an endpoint configured without one is sent to.
-DEFAULT_BASE_URL = "https://api.openai.com"
-
 #: Response keys naming the endpoint an attempt went to.
 _SERVED_BY_KEYS = ("endpoint_model", "endpoint_id", "endpoint_base_url")
-
-
-def _base_url(endpoint: Endpoint) -> str:
-    base_url: str = endpoint.params.get("base_url", DEFAULT_BASE_URL)
-    return base_url
 
 
 def _served_by(endpoint: Endpoint) -> Dict[str, str]:
     return {
         "endpoint_model": endpoint.model,
         "endpoint_id": endpoint.id,
-        "endpoint_base_url": _base_url(endpoint),
+        "endpoint_base_url": endpoint.upstream_base_url,
     }
 
 
@@ -463,7 +455,7 @@ class BaseRequestHandler(ABC):
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
-                "X-Proxy-Endpoint-Base-Url": _base_url(endpoint),
+                "X-Proxy-Endpoint-Base-Url": endpoint.upstream_base_url,
                 "X-Proxy-Cache-Hit": "false",
             },
         )

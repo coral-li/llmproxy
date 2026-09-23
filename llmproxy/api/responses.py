@@ -143,7 +143,7 @@ class ResponseHandler(BaseRequestHandler):
         """Make request to a specific endpoint"""
 
         # Extract endpoint parameters
-        base_url = endpoint.params.get("base_url", "https://api.openai.com")
+        base_url = endpoint.upstream_base_url
 
         # Create a copy of request data, filter proxy params, and update the model name
         filtered_data = self._filter_proxy_params(request_data)
