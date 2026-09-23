@@ -1,5 +1,7 @@
 import json
+import uuid
 
+import pytest
 import redis.asyncio as redis
 
 from llmproxy.core.cache_manager import CacheManager, StreamingCacheWriter
@@ -264,3 +266,31 @@ def test_completed_outputs_preserve_encrypted_content():
 
     cleaned = writer._clean_completed_outputs(outputs)
     assert cleaned[0].get("encrypted_content") == "enc-abc"
+
+
+class TestClearingTheCache:
+    """`DELETE /cache` clears its own namespace, whatever characters it holds."""
+
+    @pytest.mark.parametrize("suffix", ["*", "?", "[a-z]", "\\x"])
+    async def test_only_the_namespaces_own_keys_are_deleted(self, suffix):
+        prefix = f"cache-clear-{uuid.uuid4().hex}"
+        namespace = prefix + suffix
+        own = f"{namespace}:entry"
+        # Unescaped, the pattern for each namespace here matches some of these.
+        usage_stream = f"{prefix}-telemetry:usage"
+        neighbours = [f"{prefix}a:entry", f"{prefix}x:entry"]
+        client = redis.Redis(host="localhost", port=6379, decode_responses=True)
+        try:
+            await client.set(own, "cached")
+            await client.xadd(usage_stream, {"payload": "{}"})
+            for key in neighbours:
+                await client.set(key, "unrelated")
+
+            deleted = await CacheManager(client, namespace=namespace).invalidate_all()
+
+            assert deleted == 1
+            assert await client.exists(own) == 0
+            assert await client.exists(usage_stream, *neighbours) == 3
+        finally:
+            await client.delete(own, usage_stream, *neighbours)
+            await client.aclose()
