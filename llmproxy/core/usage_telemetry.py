@@ -138,8 +138,9 @@ def normalize_usage(payload: Any) -> Optional[Dict[str, int]]:
 
     input_tokens = _first_int(usage, _INPUT_TOKEN_KEYS)
     output_tokens = _first_int(usage, _OUTPUT_TOKEN_KEYS)
-    total_tokens = _first_int(usage, ("total_tokens",)) or (
-        input_tokens + output_tokens
+    # Each count is clamped on its own, so their sum can pass the ceiling.
+    total_tokens = _first_int(usage, ("total_tokens",)) or min(
+        input_tokens + output_tokens, _MAX_TOKEN_COUNT
     )
 
     return {

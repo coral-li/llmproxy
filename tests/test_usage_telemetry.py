@@ -160,6 +160,14 @@ class TestNormalizeUsage:
         assert usage is not None
         assert usage["input_tokens"] == 2**63 - 1
 
+    def test_a_total_summed_from_clamped_counts_is_clamped_too(self):
+        """Without `total_tokens`, the total is a sum that can pass the ceiling."""
+        usage = normalize_usage(
+            {"usage": {"prompt_tokens": 10**40, "completion_tokens": 10**40}}
+        )
+        assert usage is not None
+        assert usage["total_tokens"] == 2**63 - 1
+
 
 class TestReasoningEffort:
     def test_responses_api_nested_effort(self):
