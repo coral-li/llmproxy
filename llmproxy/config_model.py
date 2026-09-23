@@ -1,6 +1,6 @@
 from typing import List, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, model_validator
 
 DEFAULT_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024
 DEFAULT_MAX_CACHE_ENTRY_BYTES = 64 * 1024 * 1024
@@ -41,7 +41,8 @@ class CacheParams(BaseModel):
 
     type: str = "redis"
     ttl: int = 604800  # 7 days default
-    namespace: str = "llmproxy.cache"
+    # Prefix of every cached response's key, and what clearing the cache sweeps.
+    namespace: str = RESPONSE_CACHE_NAMESPACE
     host: str
     port: Union[int, str]
     password: str
@@ -65,16 +66,6 @@ class UsageStreamParams(BaseModel):
     # Inbound request headers copied onto each record so a caller can attribute
     # a request to the agent or workflow that issued it.
     caller_headers: List[str] = Field(default_factory=list)
-
-    @field_validator("stream_key")
-    @classmethod
-    def _outside_response_cache(cls, stream_key: str) -> str:
-        if stream_key.startswith(f"{RESPONSE_CACHE_NAMESPACE}:"):
-            raise ValueError(
-                f"stream_key must not start with '{RESPONSE_CACHE_NAMESPACE}:', "
-                "where clearing the response cache would delete it"
-            )
-        return stream_key
 
 
 class GeneralSettings(BaseModel):
@@ -104,6 +95,25 @@ class GeneralSettings(BaseModel):
         default=DEFAULT_MAX_CACHE_ENTRY_BYTES,
         gt=0,
     )
+
+    @property
+    def cache_namespace(self) -> str:
+        """The key prefix of cached responses, which clearing the cache sweeps."""
+        if self.cache_params is None:
+            return RESPONSE_CACHE_NAMESPACE
+        return self.cache_params.namespace
+
+    @model_validator(mode="after")
+    def _usage_stream_outside_the_cache(self) -> "GeneralSettings":
+        if self.usage_stream and self.usage_stream.stream_key.startswith(
+            f"{self.cache_namespace}:"
+        ):
+            raise ValueError(
+                "usage_stream.stream_key must not start with "
+                f"'{self.cache_namespace}:', where clearing the response cache "
+                "would delete it"
+            )
+        return self
 
 
 class LLMProxyConfig(BaseModel):

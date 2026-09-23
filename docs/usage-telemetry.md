@@ -23,7 +23,7 @@ general_settings:
 | Field | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Set to `false` to keep the block but stop emitting. |
-| `stream_key` | `llmproxy-telemetry:usage` | Redis Stream key to append to. It may not start with `llmproxy:`: `DELETE /cache` removes every key under that prefix. |
+| `stream_key` | `llmproxy-telemetry:usage` | Redis Stream key to append to. It must stay outside the cache namespace (`cache_params.namespace`, default `llmproxy`): `DELETE /cache` removes every key under it. |
 | `max_len` | `100000` | Approximate cap (`XADD MAXLEN ~`). See [sizing](#sizing). |
 | `caller_headers` | none | Inbound request headers copied onto each record. Matched case-insensitively; values are trimmed to 256 characters. |
 

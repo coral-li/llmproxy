@@ -20,7 +20,12 @@ from llmproxy.api.chat_completions import ChatCompletionHandler
 from llmproxy.api.embeddings import EmbeddingHandler
 from llmproxy.api.responses import ResponseHandler
 from llmproxy.clients.llm_client import LLMClient
-from llmproxy.config_model import GeneralSettings, LLMProxyConfig, UsageStreamParams
+from llmproxy.config_model import (
+    CacheParams,
+    GeneralSettings,
+    LLMProxyConfig,
+    UsageStreamParams,
+)
 from llmproxy.core import usage_telemetry
 from llmproxy.core.usage_telemetry import (
     ServedBy,
@@ -156,6 +161,20 @@ def make_handler(
 
 def upstream_error(status_code: int, body: str) -> dict:
     return {"status_code": status_code, "error": body, "headers": {}, "data": None}
+
+
+def general_settings(**overrides: Any) -> GeneralSettings:
+    return GeneralSettings(
+        bind_port=5000,
+        redis_host="localhost",
+        redis_port=6379,
+        redis_password="",
+        **overrides,
+    )
+
+
+def cache_config(**overrides: Any) -> CacheParams:
+    return CacheParams(host="localhost", port=6379, password="", **overrides)
 
 
 async def drain(stream: AsyncIterator[Any]) -> List[Any]:
@@ -389,7 +408,29 @@ class TestUsageStreamParams:
     def test_rejects_a_stream_key_inside_the_response_cache(self):
         """Clearing the cache deletes everything under `llmproxy:`."""
         with pytest.raises(ValidationError):
-            UsageStreamParams(stream_key="llmproxy:usage")
+            general_settings(
+                usage_stream=UsageStreamParams(stream_key="llmproxy:usage")
+            )
+
+    def test_the_cache_namespace_is_the_one_configured(self):
+        assert general_settings().cache_namespace == "llmproxy"
+        assert (
+            general_settings(cache_params=cache_config()).cache_namespace == "llmproxy"
+        )
+        custom = general_settings(cache_params=cache_config(namespace="responses"))
+        assert custom.cache_namespace == "responses"
+
+    def test_the_stream_is_kept_out_of_a_configured_namespace(self):
+        with pytest.raises(ValidationError):
+            general_settings(
+                cache_params=cache_config(namespace="responses"),
+                usage_stream=UsageStreamParams(stream_key="responses:usage"),
+            )
+        # Outside the configured namespace is fine, whatever the default was.
+        general_settings(
+            cache_params=cache_config(namespace="responses"),
+            usage_stream=UsageStreamParams(stream_key="llmproxy:usage"),
+        )
 
 
 class TestUsageRecorder:

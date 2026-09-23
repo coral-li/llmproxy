@@ -13,7 +13,6 @@ from pydantic import BaseModel
 from llmproxy.api.routes import create_router
 from llmproxy.clients.llm_client import LLMClient
 from llmproxy.config.config_loader import load_config_async
-from llmproxy.config_model import RESPONSE_CACHE_NAMESPACE
 from llmproxy.core.cache_manager import CacheManager
 from llmproxy.core.exceptions import LLMProxyError
 from llmproxy.core.logger import get_logger, setup_logging
@@ -98,7 +97,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         cache_manager = CacheManager(
             redis_client=redis_manager.get_client(),
             ttl=cache_ttl,
-            namespace=RESPONSE_CACHE_NAMESPACE,
+            namespace=config.general_settings.cache_namespace,
             cache_enabled=config.general_settings.cache,
             max_cache_entry_bytes=config.general_settings.max_cache_entry_bytes,
         )
