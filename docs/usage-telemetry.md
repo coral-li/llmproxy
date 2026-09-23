@@ -56,8 +56,9 @@ client.chat.completions.create(
 )
 ```
 
-With Pydantic AI, set `extra_headers` in `ModelSettings`, or attach a shared
-`httpx.AsyncClient` whose event hook injects them per run.
+With Pydantic AI, set `extra_headers` in `ModelSettings`, or add a request event
+hook to the provider's HTTP client that injects them per run. Keep that client to
+one event loop: its pooled connections belong to the loop that opened them.
 
 ## Record shape
 
@@ -100,9 +101,11 @@ Notes on individual fields:
   name the endpoint too: when every endpoint failed, or none was left to try
   after a failure, the record names the last one tried. They are `null` only
   when no upstream call was made.
-- `attempts` counts endpoints tried. A value above 1 means failover occurred;
-  `0` means no upstream call was made, because the cache answered, no
-  endpoint was available, or a Responses follow-up could not be routed.
+- `attempts` counts the upstream requests made. Above 1 means the call was
+  retried: on another endpoint after a failure, or, for a Responses follow-up,
+  on the endpoint holding the state it continues, which is the only one that
+  can serve it. `0` means no upstream call was made: the cache answered, no
+  endpoint was available, or a follow-up could not be routed.
 - `status_code` is the status the caller received. Streams, which have already
   answered 200 when they end, record one of three instead when they do not
   finish cleanly: `499` when the client went away, `500` when the stream
