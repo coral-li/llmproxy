@@ -338,3 +338,100 @@ async def test_failover_succeeds_on_second_endpoint():
     # Verify success response
     assert result["status_code"] == 200
     assert "endpoint_base_url" in result
+
+
+REQUEST = {"model": "gpt-3.5-turbo", "messages": [], "stream": False}
+
+
+def _endpoint(host: str) -> Endpoint:
+    return Endpoint(model="gpt-3.5-turbo", weight=1, params={"base_url": host})
+
+
+def _upstream(status_code: int) -> dict:
+    return {
+        "status_code": status_code,
+        "error": '{"error": {"code": "invalid_json_schema", "message": "no"}}',
+        "headers": {},
+        "data": None,
+    }
+
+
+def _handler_over(endpoints: list, upstream: dict, *, retries: int = 3):
+    """A chat handler whose every upstream attempt answers `upstream`."""
+    load_balancer = AsyncMock()
+    load_balancer.endpoint_configs = {"gpt-3.5-turbo": endpoints}
+    load_balancer.select_endpoint.side_effect = list(endpoints)
+    llm_client = AsyncMock()
+    llm_client.create_chat_completion.return_value = upstream
+    config = LLMProxyConfig(
+        general_settings=GeneralSettings(
+            bind_port=5000,
+            redis_host="localhost",
+            redis_port=6379,
+            redis_password="",
+            num_retries=retries,
+            cache=False,
+        ),
+        model_groups=[],
+    )
+    handler = ChatCompletionHandler(
+        load_balancer=load_balancer,
+        cache_manager=AsyncMock(),
+        llm_client=llm_client,
+        config=config,
+    )
+    return handler, load_balancer, llm_client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [400, 413, 422])
+async def test_a_refusal_reaches_the_caller_once_every_endpoint_was_tried(
+    status_code,
+):
+    """Not a 503, which reads as an outage and invites a retry."""
+    handler, _balancer, client = _handler_over(
+        [_endpoint("https://a")], _upstream(status_code)
+    )
+
+    result = await handler._execute_with_failover("gpt-3.5-turbo", REQUEST)
+
+    assert result["status_code"] == status_code
+    assert result["error"] == _upstream(status_code)["error"]
+    assert client.create_chat_completion.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_reaches_the_caller_when_other_endpoints_are_unavailable():
+    first, second = _endpoint("https://a"), _endpoint("https://b")
+    handler, balancer, _client = _handler_over([first, second], _upstream(400))
+    # The second endpoint is cooling down, so there is nothing left to try.
+    balancer.select_endpoint.side_effect = [first, None]
+
+    result = await handler._execute_with_failover("gpt-3.5-turbo", REQUEST)
+
+    assert result["status_code"] == 400
+
+
+@pytest.mark.asyncio
+async def test_every_endpoint_gets_a_chance_to_accept_a_refused_request():
+    endpoints = [_endpoint("https://a"), _endpoint("https://b")]
+    handler, _balancer, client = _handler_over(endpoints, _upstream(400))
+
+    result = await handler._execute_with_failover("gpt-3.5-turbo", REQUEST)
+
+    assert result["status_code"] == 400
+    assert client.create_chat_completion.call_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403, 404])
+async def test_a_misconfigured_endpoint_is_still_the_proxys_failure(status_code):
+    """A bad key or a missing deployment says nothing about the request."""
+    handler, _balancer, _client = _handler_over(
+        [_endpoint("https://a")], _upstream(status_code)
+    )
+
+    result = await handler._execute_with_failover("gpt-3.5-turbo", REQUEST)
+
+    assert result["status_code"] == 503
+    assert result["error_label"] == "invalid_json_schema"

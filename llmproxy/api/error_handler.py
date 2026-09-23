@@ -116,6 +116,19 @@ class EndpointError(APIError):
         self.endpoint_id = endpoint_id
 
 
+#: Statuses with which an upstream refuses the request itself: a malformed
+#: body, a schema it rejects, a payload too large. Every endpoint refuses such
+#: a request the same way. Authentication, permission and not-found errors are
+#: not among them: those mean an endpoint is misconfigured, which is the
+#: proxy's problem rather than the caller's.
+REQUEST_ERROR_STATUSES = frozenset({400, 413, 422})
+
+
+def is_request_error(status_code: int) -> bool:
+    """Whether an upstream refused the request rather than failed to serve it."""
+    return status_code in REQUEST_ERROR_STATUSES
+
+
 def is_retryable_error(status_code: int) -> bool:
     """Determine if an HTTP status code indicates a retryable error"""
     # Retry on:

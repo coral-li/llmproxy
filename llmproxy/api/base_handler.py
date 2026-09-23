@@ -16,7 +16,7 @@ from typing import (
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
-from llmproxy.api.error_handler import is_retryable_error
+from llmproxy.api.error_handler import is_request_error, is_retryable_error
 from llmproxy.clients.llm_client import LLMClient
 from llmproxy.config_model import LLMProxyConfig
 from llmproxy.core.cache_manager import CacheManager
@@ -419,7 +419,7 @@ class BaseRequestHandler(ABC):
     ) -> dict:
         """Response when no endpoints are available"""
         logger.error("no_endpoint_available", model_group=model_group)
-        return self._attribute_to_last_attempt(
+        return self._out_of_endpoints(
             {
                 "status_code": 503,
                 "headers": {},
@@ -560,7 +560,7 @@ class BaseRequestHandler(ABC):
         self, attempts: int, last_attempt: Optional[dict] = None
     ) -> dict:
         """Response when all endpoints have failed"""
-        return self._attribute_to_last_attempt(
+        return self._out_of_endpoints(
             {
                 "status_code": 503,
                 "headers": {},
@@ -571,6 +571,18 @@ class BaseRequestHandler(ABC):
             },
             last_attempt,
         )
+
+    @classmethod
+    def _out_of_endpoints(cls, failure: dict, last_attempt: Optional[dict]) -> dict:
+        """The answer once no endpoint is left to try.
+
+        A request the last upstream refused would be refused by every endpoint,
+        so the caller gets that refusal rather than a 503 that reads as an
+        outage and invites a retry. Any other failure becomes `failure`.
+        """
+        if last_attempt is not None and is_request_error(last_attempt["status_code"]):
+            return last_attempt
+        return cls._attribute_to_last_attempt(failure, last_attempt)
 
     @staticmethod
     def _attribute_to_last_attempt(

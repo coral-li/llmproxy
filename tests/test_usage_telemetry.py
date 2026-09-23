@@ -762,6 +762,28 @@ class TestAttemptsAndEndpointReporting:
         assert record["error"] == "http_429"
 
     @pytest.mark.asyncio
+    async def test_a_refusal_on_the_only_endpoint_is_recorded_as_a_refusal(self):
+        only = make_endpoint("a")
+        handler, load_balancer, _cache, client, recorder, redis = make_handler(
+            endpoints=(only,)
+        )
+        load_balancer.select_endpoint.return_value = only
+        client.create_chat_completion.return_value = upstream_error(
+            400, '{"error": {"code": "invalid_json_schema", "message": "no"}}'
+        )
+
+        with pytest.raises(HTTPException) as raised:
+            await handler.handle_request({"model": "m", "messages": []})
+
+        assert raised.value.status_code == 400
+        await recorder.flush()
+        (record,) = redis.records()
+        assert record["status_code"] == 400
+        assert record["attempts"] == 1
+        assert record["endpoint_base_url"] == "https://a"
+        assert record["error"] == "invalid_json_schema"
+
+    @pytest.mark.asyncio
     async def test_a_streaming_request_that_cannot_connect_is_recorded(self):
         endpoint = make_endpoint("a")
         handler, load_balancer, _cache, client, recorder, redis = make_handler(

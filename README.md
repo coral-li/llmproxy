@@ -5,7 +5,7 @@ LLMProxy is a FastAPI-based proxy that load balances across multiple Large Langu
 ## Why LLMProxy?
 
 - **Provider-agnostic**: Register OpenAI, Azure OpenAI, and any OpenAI-compatible endpoints in a single configuration.
-- **Graceful failover**: Automatically detect failing upstreams, cool them down, and retry requests against healthy endpoints.
+- **Graceful failover**: Automatically detect failing upstreams, cool them down, and retry requests against healthy endpoints. A request every endpoint refuses (400, 413, 422) comes back to the caller as that refusal, not as a 503.
 - **Observability built in**: Health and statistics endpoints expose live state; Redis-backed state tracking keeps multiple proxy instances in sync.
 - **Deterministic caching**: Cache both regular and streaming responses in Redis with fine-grained controls and manual cache invalidation.
 - **Drop-in OpenAI compatibility**: Reuse existing SDK clients (chat completions, responses, embeddings) by only changing the base URL.
