@@ -66,9 +66,11 @@ class UsageStreamParams(BaseModel):
     # Consumers read this key from a position they track themselves; see
     # docs/usage-telemetry.md.
     stream_key: str = "llmproxy-telemetry:usage"
-    # Approximate cap (XADD MAXLEN ~). Redis never evicts a stream and reading
-    # one does not shrink it, so the stream settles at about this many entries:
-    # at roughly 0.75 KB each, the default holds about 75 MB.
+    # Approximate cap (XADD MAXLEN ~). Reading does not remove entries and the
+    # stream has no expiry, so it settles at about this many entries: at
+    # roughly 0.75 KB each, the default holds about 75 MB. A trimming limit, not
+    # a retention guarantee: an `allkeys-*` eviction policy, or a restart
+    # without persistence, can still drop the whole stream.
     max_len: int = Field(default=100_000, gt=0)
     # Inbound request headers copied onto each record so a caller can attribute
     # a request to the agent or workflow that issued it.

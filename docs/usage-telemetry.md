@@ -36,12 +36,23 @@ Writes are best effort. If Redis is unavailable the failure is logged as
 
 ### Sizing
 
-Redis never evicts a stream, and reading one does not shrink it, so the stream
-settles at about `max_len` entries and stays there. A record takes roughly
-0.75 KB, so the default holds about 75 MB. The cap is also how far a consumer
-can fall behind: entries trimmed before it reads them are lost. Size it to cover
-the longest consumer outage you want to survive, within what the Redis instance
-can spare.
+Reading a stream does not remove its entries, and the proxy sets no expiry on
+it, so it grows to about `max_len` entries and is trimmed there. A record takes
+roughly 0.75 KB, so the default holds about 75 MB. The cap is also how far a
+consumer can fall behind: entries trimmed before it reads them are lost. Size
+it to cover the longest consumer outage you want to survive, within what the
+Redis instance can spare.
+
+`max_len` is a trimming limit, not a guarantee of how long records last. Redis
+can still drop the whole stream, unread records included:
+
+- under an `allkeys-*` eviction policy (`maxmemory-policy`), when memory runs
+  short, even while the stream is below `max_len`. The stream shares Redis with
+  the response cache, so cache growth can evict it.
+- on a restart, if Redis persists nothing to disk.
+
+Where the records must survive either, run Redis with a `noeviction` or
+`volatile-*` policy and with persistence enabled.
 
 ## Caller attribution
 
