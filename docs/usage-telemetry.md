@@ -101,8 +101,8 @@ Notes on individual fields:
   after a failure, the record names the last one tried. They are `null` only
   when no upstream call was made.
 - `attempts` counts endpoints tried. A value above 1 means failover occurred;
-  `0` means no upstream call was made, because the cache answered or no
-  endpoint was available.
+  `0` means no upstream call was made, because the cache answered, no
+  endpoint was available, or a Responses follow-up could not be routed.
 - `status_code` is the status the caller received. Streams, which have already
   answered 200 when they end, record one of three instead when they do not
   finish cleanly: `499` when the client went away, `500` when the stream
@@ -118,8 +118,12 @@ Notes on individual fields:
   value is not a short lowercase word.
 - `error` is present only on failures, as a short code rather than text: the
   provider's error code or type when it sends one (`content_filter`),
-  `http_<status>` when it does not, the proxy's own (`no_available_endpoints`,
-  `all_endpoints_failed`), or an exception class name.
+  `http_<status>` when it does not, the proxy's own, or an exception class
+  name. The proxy's own are `no_available_endpoints` and
+  `all_endpoints_failed`, and, for a Responses follow-up it cannot route,
+  `affinity_expired` (the mapping to its endpoint has lapsed),
+  `affinity_endpoint_unavailable` (that endpoint is no longer configured) or
+  `affinity_conflict` (its items belong to different endpoints).
 
 Prompt and response content is never recorded — only counts and labels. That
 is why `error` is a code: upstream error bodies can quote the request back.

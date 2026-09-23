@@ -2,10 +2,10 @@ import json
 import time
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
-from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
 from llmproxy.api.base_handler import BaseRequestHandler
+from llmproxy.api.error_handler import ProxyRefusal
 from llmproxy.clients.llm_client import LLMClient
 from llmproxy.config_model import LLMProxyConfig
 from llmproxy.core.cache_manager import CacheManager
@@ -236,9 +236,10 @@ class ResponseHandler(BaseRequestHandler):
             if endpoint.id == endpoint_id:
                 return endpoint
 
-        raise HTTPException(
-            status_code=409,
-            detail="Encrypted reasoning items mapped to an unavailable endpoint",
+        raise ProxyRefusal(
+            409,
+            "Encrypted reasoning items mapped to an unavailable endpoint",
+            label="affinity_endpoint_unavailable",
         )
 
     def _get_previous_response_id(self, request_data: dict) -> Optional[str]:
@@ -254,20 +255,20 @@ class ResponseHandler(BaseRequestHandler):
             previous_response_id
         )
         if not endpoint_id:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Unknown previous_response_id; affinity mapping expired or missing"
-                ),
+            raise ProxyRefusal(
+                409,
+                "Unknown previous_response_id; affinity mapping expired or missing",
+                label="affinity_expired",
             )
 
         for endpoint in self.load_balancer.endpoint_configs.get(model_group, []):
             if endpoint.id == endpoint_id:
                 return endpoint
 
-        raise HTTPException(
-            status_code=409,
-            detail="previous_response_id mapped to an unavailable endpoint",
+        raise ProxyRefusal(
+            409,
+            "previous_response_id mapped to an unavailable endpoint",
+            label="affinity_endpoint_unavailable",
         )
 
     def _extract_encrypted_reasoning_inputs(self, request_data: dict) -> List[str]:
@@ -432,22 +433,20 @@ class ResponseHandler(BaseRequestHandler):
                 )
             )
             if not endpoint_id:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "Unknown encrypted reasoning content; affinity mapping expired "
-                        "or missing"
-                    ),
+                raise ProxyRefusal(
+                    409,
+                    "Unknown encrypted reasoning content; affinity mapping expired "
+                    "or missing",
+                    label="affinity_expired",
                 )
             endpoint_ids.add(endpoint_id)
 
         if len(endpoint_ids) > 1:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Encrypted reasoning items map to different endpoints; "
-                    "cannot safely route request"
-                ),
+            raise ProxyRefusal(
+                409,
+                "Encrypted reasoning items map to different endpoints; "
+                "cannot safely route request",
+                label="affinity_conflict",
             )
 
         return endpoint_ids.pop()

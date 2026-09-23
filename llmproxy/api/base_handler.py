@@ -17,7 +17,11 @@ from typing import (
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
-from llmproxy.api.error_handler import is_request_error, is_retryable_error
+from llmproxy.api.error_handler import (
+    ProxyRefusal,
+    is_request_error,
+    is_retryable_error,
+)
 from llmproxy.clients.llm_client import LLMClient
 from llmproxy.config_model import LLMProxyConfig
 from llmproxy.core.cache_manager import CacheManager
@@ -127,9 +131,19 @@ class BaseRequestHandler(ABC):
             return cached_response
 
         # Execute request with retries
-        response = await self._execute_with_failover(
-            model_group, request_data, usage_context
-        )
+        try:
+            response = await self._execute_with_failover(
+                model_group, request_data, usage_context
+            )
+        except ProxyRefusal as refusal:
+            # Turned away before any upstream call, so no response carries it.
+            self.usage_recorder.record(
+                usage_context,
+                status_code=refusal.status_code,
+                attempts=0,
+                error=refusal.label,
+            )
+            raise
 
         # For streaming responses, return immediately. The usage record is
         # written by the stream observer once the stream ends.

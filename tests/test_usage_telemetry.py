@@ -785,6 +785,29 @@ class TestAttemptsAndEndpointReporting:
         assert record["endpoint_model"] == "gpt-5"
 
 
+class TestPinnedFollowUps:
+    """A Responses follow-up goes to the endpoint that holds its state."""
+
+    @pytest.mark.asyncio
+    async def test_a_follow_up_that_cannot_be_routed_is_recorded(self):
+        """Refused before any upstream call, which is why nothing else records it."""
+        harness = make_handler(ResponseHandler, endpoints=(make_endpoint("a"),))
+        harness.handler.response_affinity_manager.get_endpoint_id.return_value = None
+
+        with pytest.raises(HTTPException) as raised:
+            await harness.handler.handle_request(
+                {"model": "m", "input": "hi", "previous_response_id": "resp_gone"}
+            )
+
+        assert raised.value.status_code == 409
+        harness.llm_client.create_response.assert_not_called()
+        record = await harness.only_record()
+        assert record["status_code"] == 409
+        assert record["attempts"] == 0
+        assert record["error"] == "affinity_expired"
+        assert record["endpoint_id"] is None
+
+
 class TestCacheHitRecording:
     @pytest.mark.asyncio
     async def test_a_streamed_hit_reports_what_the_cache_saved(self):
