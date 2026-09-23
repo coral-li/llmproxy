@@ -40,6 +40,7 @@ from llmproxy.core.usage_telemetry import (
     extract_caller_headers,
     extract_reasoning_effort,
     normalize_usage,
+    usage_from_chunks,
 )
 
 #: Every field a record carries; `error` is added only when the call failed.
@@ -64,6 +65,8 @@ RECORD_FIELDS = {
 CHAT_USAGE_CHUNK = (
     'data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":3}}\n\n'
 )
+#: A delta as upstreams send it under `stream_options.include_usage`.
+CHAT_DELTA_CHUNK = 'data: {"choices":[{"delta":{"content":"a"}}],"usage":null}\n\n'
 
 
 def ok(data: dict) -> dict:
@@ -285,6 +288,18 @@ class TestStreamUsageObserver:
             'data: {"type":"response.created","response":{"error":null}}\n\n'
         )
         assert observer.error is None
+
+    def test_a_replayed_stream_reports_its_final_usage(self):
+        """Every delta says `"usage": null` when the caller asked for usage."""
+        chunks = [CHAT_DELTA_CHUNK] * 50 + [CHAT_USAGE_CHUNK, "data: [DONE]\n\n"]
+
+        usage = usage_from_chunks(chunks)
+
+        assert usage is not None
+        assert usage["input_tokens"] == 11
+
+    def test_a_replayed_stream_without_usage_reports_none(self):
+        assert usage_from_chunks([CHAT_DELTA_CHUNK, "data: [DONE]\n\n"]) is None
 
 
 class TestUsageStreamParams:

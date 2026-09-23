@@ -154,10 +154,17 @@ def normalize_usage(payload: Any) -> Optional[Dict[str, int]]:
 
 
 def usage_from_chunks(chunks: List[str]) -> Optional[Dict[str, int]]:
-    """Extract the usage report from a replayed SSE stream."""
+    """Extract the usage report from a replayed SSE stream.
+
+    A stream reports usage once, at its end, so the scan starts there. It runs
+    on the event loop before the replay begins, and a chat stream whose every
+    chunk carries `"usage": null` would otherwise be parsed in full.
+    """
     observer = StreamUsageObserver()
-    for chunk in chunks:
+    for chunk in reversed(chunks):
         observer.observe(chunk)
+        if observer.usage is not None:
+            break
     return observer.usage
 
 
