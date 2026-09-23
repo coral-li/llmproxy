@@ -73,6 +73,7 @@ class TestProxyLive:
                 {"role": "user", "content": "Count from 1 to 5, one number at a time."}
             ],
             stream=True,
+            stream_options={"include_usage": True},
             extra_body={"cache": {"no-cache": True}},
         )
 

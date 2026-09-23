@@ -14,7 +14,12 @@ from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.responses import JSONResponse, StreamingResponse  # noqa: E402
 from openai import AsyncOpenAI, OpenAI  # noqa: E402
 
+from llmproxy.config.config_loader import load_config  # noqa: E402
+from llmproxy.config_model import LLMProxyConfig  # noqa: E402
 from llmproxy.main import app  # noqa: E402
+
+#: The configuration the test proxy runs with.
+TEST_CONFIG = "llmproxy.test.yaml"
 
 
 def find_free_port() -> int:
@@ -128,7 +133,10 @@ class MockOpenAIServer:
             if is_streaming:
                 return StreamingResponse(
                     self._stream_response(
-                        tagged_response_content, model, initial_delay=delay_seconds
+                        tagged_response_content,
+                        model,
+                        initial_delay=delay_seconds,
+                        include_usage=self._wants_usage(body),
                     ),
                     media_type="text/plain",
                 )
@@ -192,60 +200,56 @@ class MockOpenAIServer:
         else:
             return f"Mock response to: {user_message}"
 
+    @staticmethod
+    def _wants_usage(body: dict) -> bool:
+        stream_options = body.get("stream_options")
+        return isinstance(stream_options, dict) and bool(
+            stream_options.get("include_usage")
+        )
+
     async def _stream_response(
-        self, content: str, model: str, initial_delay: float = 0.1
+        self,
+        content: str,
+        model: str,
+        initial_delay: float = 0.1,
+        include_usage: bool = False,
     ):
         """Generate streaming response"""
         # Add artificial delay for cache testing (simulate network latency for first request)
         # This ensures measurable timing differences between cached and non-cached requests
         await asyncio.sleep(initial_delay)
 
-        # First chunk
-        chunk = {
-            "id": "chatcmpl-mock123",
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": ""},
-                    "finish_reason": None,
-                }
-            ],
-        }
-        yield f"data: {json.dumps(chunk)}\n\n"
-
-        # Content chunks
-        for word in content.split():
+        def chat_chunk(choice: dict) -> str:
             chunk = {
                 "id": "chatcmpl-mock123",
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": f"{word} "},
-                        "finish_reason": None,
-                    }
-                ],
+                "choices": [{"index": 0, **choice}],
             }
-            yield f"data: {json.dumps(chunk)}\n\n"
+            if include_usage:
+                # Every chunk before the usage report carries a null usage.
+                chunk["usage"] = None
+            return f"data: {json.dumps(chunk)}\n\n"
+
+        yield chat_chunk(
+            {"delta": {"role": "assistant", "content": ""}, "finish_reason": None}
+        )
+        for word in content.split():
+            yield chat_chunk({"delta": {"content": f"{word} "}, "finish_reason": None})
             await asyncio.sleep(0.01)
+        yield chat_chunk({"delta": {}, "finish_reason": "stop"})
 
-        # Final chunk
-        chunk = {
-            "id": "chatcmpl-mock123",
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-        }
-        yield f"data: {json.dumps(chunk)}\n\n"
+        if include_usage:
+            yield self._usage_chunk(content, model)
+        yield "data: [DONE]\n\n"
 
-        # Usage-only chunk, as sent when stream_options.include_usage is set.
-        # It carries an empty choices array, which the proxy must not filter.
+    @staticmethod
+    def _usage_chunk(content: str, model: str) -> str:
+        """The chunk a `stream_options.include_usage` stream ends with.
+
+        It carries an empty choices array, which the proxy must not filter.
+        """
         usage_chunk = {
             "id": "chatcmpl-mock123",
             "object": "chat.completion.chunk",
@@ -258,8 +262,7 @@ class MockOpenAIServer:
                 "total_tokens": 10 + len(content.split()),
             },
         }
-        yield f"data: {json.dumps(usage_chunk)}\n\n"
-        yield "data: [DONE]\n\n"
+        return f"data: {json.dumps(usage_chunk)}\n\n"
 
     async def _stream_responses_api(
         self, content: str, model: str, initial_delay: float = 0.1
@@ -392,7 +395,7 @@ class LLMProxyTestServer:
             print(f"Started mock server on port {port}")
 
         # Set environment variable for config path
-        os.environ["LLMPROXY_CONFIG"] = "llmproxy.test.yaml"
+        os.environ["LLMPROXY_CONFIG"] = TEST_CONFIG
 
         # Start llmproxy server in a thread
         def run_server():
@@ -429,6 +432,8 @@ class LLMProxyTestServer:
         if "LLMPROXY_CONFIG" in os.environ:
             del os.environ["LLMPROXY_CONFIG"]
 
+        self._delete_usage_stream()
+
         # Stop temporary redis server if we started one
         if self.redis_process:
             self.redis_process.terminate()
@@ -437,6 +442,15 @@ class LLMProxyTestServer:
             except Exception:
                 self.redis_process.kill()
             self.redis_process = None
+
+    @staticmethod
+    def _delete_usage_stream() -> None:
+        """Remove the usage stream, which, unlike cached entries, never expires."""
+        import redis
+
+        usage_stream = load_config(TEST_CONFIG).general_settings.usage_stream
+        if usage_stream is not None:
+            redis.Redis(host="localhost", port=6379).delete(usage_stream.stream_key)
 
     def _check_redis(self):
         """Ensure Redis is running, start local instance if needed"""
@@ -518,6 +532,12 @@ def llmproxy_server() -> Generator[LLMProxyTestServer, None, None]:
             _test_server.stop()
             print("\n=== Stopped LLMProxy test server ===")
             _test_server = None
+
+
+@pytest.fixture(scope="session")
+def proxy_config() -> LLMProxyConfig:
+    """The configuration the test proxy runs with."""
+    return load_config(TEST_CONFIG)
 
 
 @pytest.fixture(scope="session")

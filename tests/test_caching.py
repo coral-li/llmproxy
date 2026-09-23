@@ -1,7 +1,12 @@
 import time
+import uuid
 
 import pytest
+import redis
+import requests
 from openai import AsyncOpenAI
+
+from llmproxy.config_model import LLMProxyConfig
 
 
 @pytest.mark.asyncio
@@ -43,3 +48,27 @@ async def test_responses_api_two_identical_requests_cache_speedup(
     assert (
         duration2 * 10 < duration1
     ), f"Second request not >=10x faster: {duration1:.3f}s vs {duration2:.3f}s"
+
+
+def test_responses_are_cached_under_the_configured_namespace(
+    proxy_url: str, model: str, proxy_config: LLMProxyConfig
+):
+    """`cache_params.namespace` is the prefix `DELETE /cache` sweeps."""
+    pattern = f"{proxy_config.general_settings.cache_namespace}:*"
+    client = redis.Redis(host="localhost", port=6379, decode_responses=True)
+    try:
+        before = set(client.scan_iter(pattern))
+
+        response = requests.post(
+            f"{proxy_url}/chat/completions",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": uuid.uuid4().hex}],
+            },
+            timeout=30,
+        )
+
+        assert response.status_code == 200
+        assert set(client.scan_iter(pattern)) - before
+    finally:
+        client.close()

@@ -29,7 +29,7 @@ from pydantic import ValidationError
 from llmproxy.api.embeddings import EmbeddingHandler
 from llmproxy.api.responses import ResponseHandler
 from llmproxy.clients.llm_client import LLMClient
-from llmproxy.config_model import UsageStreamParams
+from llmproxy.config_model import LLMProxyConfig, UsageStreamParams
 from llmproxy.core import usage_telemetry
 from llmproxy.core.usage_telemetry import (
     ServedBy,
@@ -309,6 +309,11 @@ class TestUsageStreamParams:
         assert params.max_len == 100_000
         assert params.caller_headers == []
 
+    def test_the_default_stream_key_sits_beside_the_default_namespace(self):
+        """The two defaults differ only after the prefix, which is what ships."""
+        general_settings(usage_stream=UsageStreamParams())
+        general_settings(cache_params=cache_config(), usage_stream=UsageStreamParams())
+
     def test_rejects_a_stream_key_inside_the_response_cache(self):
         """Clearing the cache deletes everything under `llmproxy:`."""
         with pytest.raises(ValidationError):
@@ -454,6 +459,24 @@ class TestUsageRecorder:
         recorder.record(make_context(), status_code=200, attempts=1)
         await recorder.flush()
         assert redis.records() == []
+
+    @pytest.mark.asyncio
+    async def test_a_hanging_redis_cannot_hold_up_shutdown(self):
+        class HangingRedis(FakeRedis):
+            async def xadd(self, *args: Any, **kwargs: Any) -> str:
+                await asyncio.Event().wait()
+                return ""
+
+        recorder, _redis = make_recorder(HangingRedis())
+        recorder.record(make_context(), status_code=200, attempts=1)
+
+        await asyncio.wait_for(recorder.aclose(timeout=0.05), timeout=2)
+
+    def test_a_record_with_no_running_loop_is_dropped_without_raising(self):
+        """Synchronous teardown has no loop to hand the record to."""
+        recorder, redis = make_recorder()
+        recorder.record(make_context(), status_code=200, attempts=1)
+        assert redis.entries == []
 
     def test_context_reads_the_request(self):
         context = UsageContext.from_request(
@@ -614,6 +637,30 @@ class TestAttemptsAndEndpointReporting:
         assert record["usage"]["input_tokens"] == 4
 
     @pytest.mark.asyncio
+    async def test_a_streamed_request_that_failed_over_counts_both_attempts(self):
+        first, second = make_endpoint("a"), make_endpoint("b")
+        harness = make_handler(endpoints=(first, second))
+        harness.load_balancer.select_endpoint.side_effect = [first, second]
+
+        async def upstream() -> AsyncIterator[bytes]:
+            yield CHAT_USAGE_CHUNK.encode()
+
+        harness.llm_client.create_chat_completion.side_effect = [
+            upstream_error(500, "boom"),
+            upstream(),
+        ]
+
+        response = await harness.handler.handle_request(
+            {"model": "m", "messages": [], "stream": True}
+        )
+        await drain(response.body_iterator)
+
+        record = await harness.only_record()
+        assert record["status_code"] == 200
+        assert record["attempts"] == 2
+        assert record["endpoint_id"] == second.id
+
+    @pytest.mark.asyncio
     async def test_no_endpoint_available_records_zero_attempts(self):
         harness = make_handler()
         harness.load_balancer.select_endpoint.return_value = None
@@ -669,6 +716,23 @@ class TestAttemptsAndEndpointReporting:
         assert "Jane Doe" not in json.dumps(record)
 
     @pytest.mark.asyncio
+    async def test_an_attempt_that_raised_names_its_endpoint_and_count(self):
+        endpoints = (make_endpoint("a"), make_endpoint("b"), make_endpoint("c"))
+        harness = make_handler(endpoints=endpoints)
+        harness.load_balancer.select_endpoint.side_effect = list(endpoints)
+        harness.llm_client.create_chat_completion.side_effect = RuntimeError(
+            "connect failed"
+        )
+
+        with pytest.raises(HTTPException):
+            await harness.handler.handle_request({"model": "m", "messages": []})
+
+        record = await harness.only_record()
+        assert record["attempts"] == 3
+        assert record["endpoint_base_url"] == "https://c"
+        assert record["error"] == "RuntimeError"
+
+    @pytest.mark.asyncio
     async def test_exhaustion_is_attributed_to_the_last_endpoint_tried(self):
         """With one endpoint per group every upstream failure ends this way."""
         only = make_endpoint("a")
@@ -689,20 +753,23 @@ class TestAttemptsAndEndpointReporting:
         assert record["error"] == "http_429"
 
     @pytest.mark.asyncio
-    async def test_a_refusal_on_the_only_endpoint_is_recorded_as_a_refusal(self):
+    @pytest.mark.parametrize("status_code", [400, 413, 422])
+    async def test_a_refusal_on_the_only_endpoint_is_recorded_as_a_refusal(
+        self, status_code
+    ):
         only = make_endpoint("a")
         harness = make_handler(endpoints=(only,))
         harness.load_balancer.select_endpoint.return_value = only
         harness.llm_client.create_chat_completion.return_value = upstream_error(
-            400, '{"error": {"code": "invalid_json_schema", "message": "no"}}'
+            status_code, '{"error": {"code": "invalid_json_schema", "message": "no"}}'
         )
 
         with pytest.raises(HTTPException) as raised:
             await harness.handler.handle_request({"model": "m", "messages": []})
 
-        assert raised.value.status_code == 400
+        assert raised.value.status_code == status_code
         record = await harness.only_record()
-        assert record["status_code"] == 400
+        assert record["status_code"] == status_code
         assert record["attempts"] == 1
         assert record["endpoint_base_url"] == "https://a"
         assert record["error"] == "invalid_json_schema"
@@ -725,6 +792,7 @@ class TestAttemptsAndEndpointReporting:
         record = await harness.only_record()
         assert record["status_code"] == 500
         assert record["attempts"] == 1
+        assert record["endpoint_id"] == endpoint.id
         assert record["error"] == "RuntimeError"
 
     @pytest.mark.asyncio
@@ -804,6 +872,26 @@ class TestPinnedFollowUps:
     """A Responses follow-up goes to the endpoint that holds its state."""
 
     @pytest.mark.asyncio
+    async def test_retries_on_the_pinned_endpoint_are_counted(self):
+        pinned = make_endpoint("a", model="gpt-5")
+        harness = make_handler(ResponseHandler, endpoints=(pinned,))
+        affinity = harness.handler.response_affinity_manager
+        affinity.get_endpoint_id.return_value = pinned.id
+        harness.llm_client.create_response.side_effect = [
+            upstream_error(500, "boom"),
+            ok({"output": [], "usage": {"input_tokens": 3}}),
+        ]
+
+        await harness.handler.handle_request(
+            {"model": "m", "input": "hi", "previous_response_id": "resp_1"}
+        )
+
+        record = await harness.only_record()
+        assert record["status_code"] == 200
+        assert record["attempts"] == 2
+        assert record["endpoint_id"] == pinned.id
+
+    @pytest.mark.asyncio
     async def test_a_follow_up_that_cannot_be_routed_is_recorded(self):
         """Refused before any upstream call, which is why nothing else records it."""
         harness = make_handler(ResponseHandler, endpoints=(make_endpoint("a"),))
@@ -874,6 +962,26 @@ class TestCacheHitRecording:
         assert record["cache_hit"] is True
         assert record["usage"]["input_tokens"] == 5
 
+    @pytest.mark.asyncio
+    async def test_a_streamed_responses_hit_is_recorded_once(self):
+        harness = make_handler(ResponseHandler, cache=True)
+        harness.cache_manager.get_streaming.return_value = [
+            "event: response.completed\n",
+            'data: {"type":"response.completed","response":'
+            '{"id":"resp_1","usage":{"input_tokens":8,"output_tokens":2}}}\n\n',
+        ]
+        harness.cache_manager.get_affinity.return_value = None
+
+        response = await harness.handler.handle_request(
+            {"model": "m", "input": "hi", "stream": True}
+        )
+        await drain(response.body_iterator)
+
+        record = await harness.only_record()
+        assert record["api_surface"] == "responses"
+        assert record["cache_hit"] is True
+        assert record["usage"]["input_tokens"] == 8
+
 
 class TestUsageChunkForwarding:
     """The chat usage chunk has an empty choices array and must survive."""
@@ -898,11 +1006,20 @@ class TestUsageChunkForwarding:
 # End-to-end: a real request through the running proxy must land in the stream.
 # ---------------------------------------------------------------------------
 
-TEST_STREAM_KEY = "llmproxy-telemetry:test:usage"
+
+@pytest.fixture(scope="module")
+def usage_stream_key(proxy_config: LLMProxyConfig) -> str:
+    """The stream the test proxy writes to."""
+    usage_stream = proxy_config.general_settings.usage_stream
+    assert usage_stream is not None
+    return usage_stream.stream_key
 
 
 def wait_for_records(
-    matches: Callable[[dict], bool], expected: int, timeout: float = 5.0
+    stream_key: str,
+    matches: Callable[[dict], bool],
+    expected: int,
+    timeout: float = 5.0,
 ) -> List[dict]:
     """Return the records matching one test's request, once all have landed.
 
@@ -913,7 +1030,7 @@ def wait_for_records(
     deadline = time.monotonic() + timeout
     try:
         while True:
-            entries = client.xrevrange(TEST_STREAM_KEY, count=500)
+            entries = client.xrevrange(stream_key, count=500)
             records = [
                 record
                 for record in (json.loads(fields["payload"]) for _, fields in entries)
@@ -935,7 +1052,9 @@ def unique_agent() -> str:
 
 
 class TestUsageTelemetryEndToEnd:
-    def test_non_streaming_request_is_recorded(self, proxy_url, model):
+    def test_non_streaming_request_is_recorded(
+        self, proxy_url, model, usage_stream_key
+    ):
         agent = unique_agent()
 
         response = requests.post(
@@ -951,7 +1070,7 @@ class TestUsageTelemetryEndToEnd:
         )
         assert response.status_code == 200
 
-        records = wait_for_records(labelled(agent), expected=1)
+        records = wait_for_records(usage_stream_key, labelled(agent), expected=1)
         assert len(records) == 1, f"expected one record, got {records}"
         record = records[0]
 
@@ -969,7 +1088,44 @@ class TestUsageTelemetryEndToEnd:
         assert record["usage"]["output_tokens"] > 0
         assert record["latency_ms"] >= 0
 
-    def test_streaming_request_records_usage_from_final_chunk(self, proxy_url, model):
+    def test_streaming_request_records_usage_from_final_chunk(
+        self, proxy_url, model, usage_stream_key
+    ):
+        agent = unique_agent()
+
+        with requests.post(
+            f"{proxy_url}/chat/completions",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": f"stream {agent}"}],
+                "stream": True,
+                "stream_options": {"include_usage": True},
+                "cache": {"no-cache": True},
+            },
+            headers={"X-Coral-Agent": agent},
+            stream=True,
+            timeout=30,
+        ) as response:
+            assert response.status_code == 200
+            body = response.text
+
+        assert "[DONE]" in body
+
+        records = wait_for_records(usage_stream_key, labelled(agent), expected=1)
+        assert len(records) == 1, f"expected one record, got {records}"
+        record = records[0]
+
+        assert record["streaming"] is True
+        assert record["status_code"] == 200
+        # Proves the usage chunk survived the proxy's chunk filter.
+        assert record["usage"] is not None
+        assert record["usage"]["input_tokens"] == 10
+        assert record["usage"]["output_tokens"] > 0
+
+    def test_a_stream_that_did_not_ask_for_usage_records_none(
+        self, proxy_url, model, usage_stream_key
+    ):
+        """Chat streams report usage only under `stream_options.include_usage`."""
         agent = unique_agent()
 
         with requests.post(
@@ -985,22 +1141,14 @@ class TestUsageTelemetryEndToEnd:
             timeout=30,
         ) as response:
             assert response.status_code == 200
-            body = response.text
+            assert "[DONE]" in response.text
 
-        assert "[DONE]" in body
-
-        records = wait_for_records(labelled(agent), expected=1)
+        records = wait_for_records(usage_stream_key, labelled(agent), expected=1)
         assert len(records) == 1, f"expected one record, got {records}"
-        record = records[0]
+        assert records[0]["status_code"] == 200
+        assert records[0]["usage"] is None
 
-        assert record["streaming"] is True
-        assert record["status_code"] == 200
-        # Proves the usage chunk survived the proxy's chunk filter.
-        assert record["usage"] is not None
-        assert record["usage"]["input_tokens"] == 10
-        assert record["usage"]["output_tokens"] > 0
-
-    def test_cache_hit_is_recorded_separately(self, proxy_url, model):
+    def test_cache_hit_is_recorded_separately(self, proxy_url, model, usage_stream_key):
         agent = unique_agent()
         payload = {
             "model": model,
@@ -1024,7 +1172,7 @@ class TestUsageTelemetryEndToEnd:
         assert second.status_code == 200
         assert second.json().get("_proxy_cache_hit") is True
 
-        records = wait_for_records(labelled(agent), expected=2)
+        records = wait_for_records(usage_stream_key, labelled(agent), expected=2)
         assert len(records) == 2
 
         cache_hits = [record for record in records if record["cache_hit"]]
@@ -1035,7 +1183,9 @@ class TestUsageTelemetryEndToEnd:
         assert cache_hits[0]["endpoint_id"] is None
         assert cache_hits[0]["usage"]["input_tokens"] == 10
 
-    def test_request_without_headers_still_recorded(self, proxy_url, model):
+    def test_request_without_headers_still_recorded(
+        self, proxy_url, model, usage_stream_key
+    ):
         """Attribution is optional; an unlabelled call must still be counted."""
         # The effort is the one request field a record carries, so a unique one
         # identifies this request's record among everyone else's.
@@ -1053,7 +1203,9 @@ class TestUsageTelemetryEndToEnd:
         assert response.status_code == 200
 
         records = wait_for_records(
-            lambda record: record.get("reasoning_effort") == marker, expected=1
+            usage_stream_key,
+            lambda record: record.get("reasoning_effort") == marker,
+            expected=1,
         )
         assert len(records) == 1
         assert records[0]["caller"] == {}
