@@ -78,6 +78,28 @@ def _error_label(response: dict) -> Optional[str]:
     )
 
 
+#: What a caller is told when an upstream answers 200 with a body that is not a
+#: JSON object, which none of the API surfaces here can return.
+_NON_OBJECT_BODY_DETAIL = "Invalid response data type"
+
+
+def _refuse_non_object_body(response: dict) -> dict:
+    """Turn a 200 whose body is not a JSON object into the 500 it ends as.
+
+    The caller is refused such a body, so caching it, or recording it as a
+    success, would report a request that the caller saw fail.
+    """
+    if response.get("status_code") != 200 or isinstance(response.get("data"), dict):
+        return response
+    return {
+        **response,
+        "status_code": 500,
+        "data": None,
+        "error": _NON_OBJECT_BODY_DETAIL,
+        "error_label": "invalid_response_body",
+    }
+
+
 class BaseRequestHandler(ABC):
     """Base class for request handlers with load balancing, caching, and retries"""
 
@@ -149,6 +171,11 @@ class BaseRequestHandler(ABC):
             raise HTTPException(
                 500, "Unexpected response type for non-streaming request"
             )
+
+        # Finalizing refuses a body that is not a JSON object. Settle that
+        # first, so such a body is neither cached nor recorded as a success.
+        if not is_streaming:
+            response = _refuse_non_object_body(response)
 
         # Cache successful non-streaming responses
         await self._maybe_cache_response(request_data, is_streaming, response)
@@ -324,7 +351,7 @@ class BaseRequestHandler(ABC):
                 if isinstance(data, dict):
                     return data
                 else:
-                    raise HTTPException(500, "Invalid response data type")
+                    raise HTTPException(500, _NON_OBJECT_BODY_DETAIL)
             else:
                 raise HTTPException(
                     status_code=response["status_code"],

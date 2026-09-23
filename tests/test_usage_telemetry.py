@@ -990,6 +990,50 @@ class TestRequestsForAModelNotServed:
         assert record["model_group"] == "x" * 128
 
 
+class TestABodyThatIsNotAnObject:
+    """An upstream 200 the caller is refused is recorded as the 500 it becomes."""
+
+    @staticmethod
+    def _answering(body: Any) -> tuple:
+        endpoint = make_endpoint("a")
+        harness = make_handler(endpoints=(endpoint,), cache=True)
+        harness.load_balancer.select_endpoint.return_value = endpoint
+        harness.llm_client.create_chat_completion.return_value = {
+            "status_code": 200,
+            "headers": {},
+            "data": body,
+        }
+        return harness, endpoint
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("body", [None, ["not", "an", "object"]])
+    async def test_is_recorded_once_as_the_failure_the_caller_sees(self, body):
+        harness, endpoint = self._answering(body)
+
+        with pytest.raises(HTTPException) as raised:
+            await harness.handler.handle_request({"model": "m", "messages": []})
+
+        assert raised.value.status_code == 500
+        record = await harness.only_record()
+        assert record["status_code"] == 500
+        assert record["error"] == "invalid_response_body"
+        assert record["attempts"] == 1
+        assert record["endpoint_id"] == endpoint.id
+        harness.cache_manager.set.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_object_is_still_a_success(self):
+        harness, _endpoint = self._answering({"choices": []})
+
+        body = await harness.handler.handle_request({"model": "m", "messages": []})
+
+        assert body["choices"] == []
+        record = await harness.only_record()
+        assert record["status_code"] == 200
+        assert "error" not in record
+        harness.cache_manager.set.assert_called_once()
+
+
 class TestCacheHitRecording:
     @pytest.mark.asyncio
     async def test_a_streamed_hit_reports_what_the_cache_saved(self):
