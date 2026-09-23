@@ -5,6 +5,10 @@ sits after load balancing, failover and caching, it is the only place that knows
 which endpoint actually served a request, how many attempts it took, and whether
 the proxy cache answered it without calling upstream at all.
 
+Requests the proxy refuses are recorded too, down to one that names no model.
+Only a body that is not JSON, or is larger than `max_request_body_bytes`, has no
+record: it is turned away before it is read.
+
 Telemetry is off unless `general_settings.usage_stream` is present.
 
 ## Configuration
@@ -95,7 +99,9 @@ Notes on individual fields:
 
 - `request_id` is unique per record, so a consumer can write records
   idempotently.
-- `model_group` is what the caller asked for; `endpoint_model` and
+- `model_group` is what the caller asked for, whether or not the proxy serves
+  it: a name it does not serve is kept as asked, cut to 128 characters, and a
+  request that named none records `null`. `endpoint_model` and
   `endpoint_id` are the configured deployment the request was sent to. They
   differ whenever a model group fans out across several deployments. Failures
   name the endpoint too: when every endpoint failed, or none was left to try
@@ -104,8 +110,9 @@ Notes on individual fields:
 - `attempts` counts the upstream requests made. Above 1 means the call was
   retried: on another endpoint after a failure, or, for a Responses follow-up,
   on the endpoint holding the state it continues, which is the only one that
-  can serve it. `0` means no upstream call was made: the cache answered, no
-  endpoint was available, or a follow-up could not be routed.
+  can serve it. `0` means no upstream call was made: the cache answered, the
+  model was missing or not served, no endpoint was available, or a follow-up
+  could not be routed.
 - `status_code` is the status the caller received. Streams, which have already
   answered 200 when they end, record one of three instead when they do not
   finish cleanly: `499` when the client went away, `500` when the stream
@@ -122,8 +129,10 @@ Notes on individual fields:
 - `error` is present only on failures, as a short code rather than text: the
   provider's error code or type when it sends one (`content_filter`),
   `http_<status>` when it does not, the proxy's own, or an exception class
-  name. The proxy's own are `no_available_endpoints` and
-  `all_endpoints_failed`, and, for a Responses follow-up it cannot route,
+  name. The proxy's own are `model_required` and `model_not_configured` (the
+  request named no model, or one the proxy does not serve),
+  `no_available_endpoints` and `all_endpoints_failed`, and, for a Responses
+  follow-up it cannot route,
   `affinity_expired` (the mapping to its endpoint has lapsed),
   `affinity_endpoint_unavailable` (that endpoint is no longer configured) or
   `affinity_conflict` (its items belong to different endpoints).

@@ -56,6 +56,9 @@ _DROP_LOG_INTERVAL = 100
 _MAX_CALLER_HEADER_LENGTH = 256
 #: Error labels are codes and exception class names; this only bounds them.
 _MAX_ERROR_LENGTH = 128
+#: A request for a model the proxy does not serve is recorded as it asked, so
+#: the name is caller input and bounded like any other.
+_MAX_MODEL_GROUP_LENGTH = 128
 
 #: Reasoning efforts are short lowercase words ("minimal", "high"). The value
 #: comes from the request body, so anything else is dropped rather than copied
@@ -179,6 +182,14 @@ def extract_reasoning_effort(request_data: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+def extract_model_group(request_data: Mapping[str, Any]) -> Optional[str]:
+    """Read the model a request asked for, whether or not it is served here."""
+    model = request_data.get("model")
+    if isinstance(model, str) and model:
+        return model[:_MAX_MODEL_GROUP_LENGTH]
+    return None
+
+
 def extract_caller_headers(
     headers: Mapping[str, str], wanted: List[str]
 ) -> Dict[str, str]:
@@ -291,7 +302,8 @@ class UsageContext:
     """Per-request facts known before the upstream call is made."""
 
     api_surface: str
-    model_group: str
+    #: `None` when the request named no model.
+    model_group: Optional[str]
     streaming: bool
     reasoning_effort: Optional[str] = None
     caller: Dict[str, str] = field(default_factory=dict)
@@ -303,14 +315,13 @@ class UsageContext:
         cls,
         *,
         api_surface: str,
-        model_group: str,
         request_data: Mapping[str, Any],
         caller: Dict[str, str],
         start_time: float,
     ) -> "UsageContext":
         return cls(
             api_surface=api_surface,
-            model_group=model_group,
+            model_group=extract_model_group(request_data),
             streaming=bool(request_data.get("stream", False)),
             reasoning_effort=extract_reasoning_effort(request_data),
             caller=caller,

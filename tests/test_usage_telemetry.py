@@ -481,11 +481,15 @@ class TestUsageRecorder:
     def test_context_reads_the_request(self):
         context = UsageContext.from_request(
             api_surface="responses",
-            model_group="gpt-5",
-            request_data={"stream": True, "reasoning": {"effort": "high"}},
+            request_data={
+                "model": "gpt-5",
+                "stream": True,
+                "reasoning": {"effort": "high"},
+            },
             caller={"x-coral-agent": "a"},
             start_time=time.time(),
         )
+        assert context.model_group == "gpt-5"
         assert context.streaming is True
         assert context.reasoning_effort == "high"
         assert context.caller == {"x-coral-agent": "a"}
@@ -909,6 +913,51 @@ class TestPinnedFollowUps:
         assert record["attempts"] == 0
         assert record["error"] == "affinity_expired"
         assert record["endpoint_id"] is None
+
+
+class TestRequestsForAModelNotServed:
+    """Refused before any upstream call, and recorded as every refusal is."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("request_data", "model_group", "detail", "code"),
+        [
+            ({"messages": []}, None, "Model is required", "model_required"),
+            (
+                {"model": "gpt-9", "messages": []},
+                "gpt-9",
+                "Model 'gpt-9' not configured",
+                "model_not_configured",
+            ),
+        ],
+    )
+    async def test_the_caller_is_answered_as_before_and_it_is_recorded(
+        self, request_data, model_group, detail, code
+    ):
+        harness = make_handler(endpoints=(make_endpoint("a"),))
+
+        with pytest.raises(HTTPException) as raised:
+            await harness.handler.handle_request(request_data)
+
+        assert (raised.value.status_code, raised.value.detail) == (400, detail)
+        harness.llm_client.create_chat_completion.assert_not_called()
+        record = await harness.only_record()
+        assert record["status_code"] == 400
+        assert record["attempts"] == 0
+        assert record["error"] == code
+        assert record["model_group"] == model_group
+        assert record["endpoint_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_the_name_asked_for_is_bounded(self):
+        """A model the proxy does not serve is caller input, recorded as asked."""
+        harness = make_handler()
+
+        with pytest.raises(HTTPException):
+            await harness.handler.handle_request({"model": "x" * 1000, "messages": []})
+
+        record = await harness.only_record()
+        assert record["model_group"] == "x" * 128
 
 
 class TestCacheHitRecording:

@@ -106,32 +106,26 @@ class BaseRequestHandler(ABC):
     ) -> Union[Dict[Any, Any], StreamingResponse]:
         """Handle incoming request with caching and failover"""
         start_time = time.time()
-
-        model = request_data.get("model")
-        if not model:
-            raise HTTPException(400, "Model is required")
-        model_group = model
-        if model_group not in self.load_balancer.get_model_groups():
-            raise HTTPException(400, f"Model '{model}' not configured")
         is_streaming = request_data.get("stream", False)
 
         usage_context = UsageContext.from_request(
             api_surface=self.api_surface,
-            model_group=model_group,
             request_data=request_data,
             caller=self.usage_recorder.caller_headers(request_headers),
             start_time=start_time,
         )
 
-        # Check cache; a hit is recorded where it is detected.
-        cached_response = await self._check_cache(
-            request_data, is_streaming, start_time, model, usage_context
-        )
-        if cached_response is not None:
-            return cached_response
-
-        # Execute request with retries
         try:
+            model_group = self._served_model_group(request_data.get("model"))
+
+            # Check cache; a hit is recorded where it is detected.
+            cached_response = await self._check_cache(
+                request_data, is_streaming, start_time, model_group, usage_context
+            )
+            if cached_response is not None:
+                return cached_response
+
+            # Execute request with retries
             response = await self._execute_with_failover(
                 model_group, request_data, usage_context
             )
@@ -168,6 +162,19 @@ class BaseRequestHandler(ABC):
 
         # Return appropriate response
         return self._finalize_response(is_streaming, response)
+
+    def _served_model_group(self, model: Any) -> str:
+        """Return the model group a request names, refusing one not served here."""
+        if not model:
+            raise ProxyRefusal(400, "Model is required", label="model_required")
+        if (
+            not isinstance(model, str)
+            or model not in self.load_balancer.get_model_groups()
+        ):
+            raise ProxyRefusal(
+                400, f"Model '{model}' not configured", label="model_not_configured"
+            )
+        return model
 
     def _record_cache_hit(
         self, context: UsageContext, cached: Union[Dict[str, Any], List[str]]
