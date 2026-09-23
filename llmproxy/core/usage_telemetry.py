@@ -20,7 +20,6 @@ import math
 import re
 import time
 import uuid
-from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from typing import (
     Any,
@@ -315,15 +314,6 @@ class UsageContext:
         return int((time.time() - self.start_time) * 1000)
 
 
-# Set once per request, so the cache check and the streaming builder -- both of
-# which subclasses override -- can reach it without threading it through every
-# signature. A stream outlives the request that built it, so it is handed the
-# context when it is wrapped rather than reading this variable later.
-current_usage_context: ContextVar[Optional[UsageContext]] = ContextVar(
-    "llmproxy_usage_context", default=None
-)
-
-
 @dataclass(frozen=True)
 class ServedBy:
     """The endpoint an upstream call went to; empty when none was reached."""
@@ -450,7 +440,7 @@ class UsageRecorder:
     def observe_stream(
         self,
         stream: AsyncIterator[Any],
-        context: Optional[UsageContext],
+        context: UsageContext,
         *,
         attempts: int,
         served_by: ServedBy,
@@ -460,7 +450,7 @@ class UsageRecorder:
         Returns the stream untouched when telemetry is off, so streaming pays
         no inspection cost in the default configuration.
         """
-        if self._sink is None or context is None:
+        if self._sink is None:
             return stream
         return self._observed(stream, context, attempts, served_by)
 

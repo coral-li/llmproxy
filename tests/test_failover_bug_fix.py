@@ -6,9 +6,17 @@ tries different endpoints instead of wasting retry attempts on the same
 failed endpoint.
 """
 
+import json
 from unittest.mock import AsyncMock
 
 import pytest
+from handler_harness import (
+    HandlerHarness,
+    make_context,
+    make_endpoint,
+    make_handler,
+    upstream_error,
+)
 
 from llmproxy.api.chat_completions import ChatCompletionHandler
 from llmproxy.config_model import GeneralSettings, LLMProxyConfig
@@ -94,7 +102,9 @@ async def test_failover_tries_different_endpoints():
     }
 
     # Execute the request (should fail after trying all endpoints)
-    result = await handler._execute_with_failover("gpt-3.5-turbo", request_data)
+    result = await handler._execute_with_failover(
+        "gpt-3.5-turbo", request_data, make_context()
+    )
 
     # Verify that the load balancer was called multiple times
     # It should be called more than 3 times because it tries to find different endpoints
@@ -178,7 +188,9 @@ async def test_failover_stops_when_all_endpoints_attempted():
     }
 
     # Execute the request
-    result = await handler._execute_with_failover("gpt-3.5-turbo", request_data)
+    result = await handler._execute_with_failover(
+        "gpt-3.5-turbo", request_data, make_context()
+    )
 
     # Should only try each endpoint once, even though num_retries=10
     assert mock_llm_client.create_chat_completion.call_count == 2
@@ -237,7 +249,9 @@ async def test_failover_returns_503_when_no_endpoints_available():
     }
 
     # Execute the request
-    result = await handler._execute_with_failover("gpt-3.5-turbo", request_data)
+    result = await handler._execute_with_failover(
+        "gpt-3.5-turbo", request_data, make_context()
+    )
 
     # Should not try any LLM client calls since no endpoints are available
     assert mock_llm_client.create_chat_completion.call_count == 0
@@ -324,7 +338,9 @@ async def test_failover_succeeds_on_second_endpoint():
     }
 
     # Execute the request
-    result = await handler._execute_with_failover("gpt-3.5-turbo", request_data)
+    result = await handler._execute_with_failover(
+        "gpt-3.5-turbo", request_data, make_context()
+    )
 
     # Should try 2 endpoints: first fails, second succeeds
     assert mock_llm_client.create_chat_completion.call_count == 2
@@ -344,43 +360,27 @@ REQUEST = {"model": "gpt-3.5-turbo", "messages": [], "stream": False}
 
 
 def _endpoint(host: str) -> Endpoint:
-    return Endpoint(model="gpt-3.5-turbo", weight=1, params={"base_url": host})
+    return make_endpoint(host, model="gpt-3.5-turbo")
 
 
-def _upstream(status_code: int) -> dict:
-    return {
-        "status_code": status_code,
-        "error": '{"error": {"code": "invalid_json_schema", "message": "no"}}',
-        "headers": {},
-        "data": None,
-    }
+def _upstream(status_code: int, code: str = "invalid_json_schema") -> dict:
+    return upstream_error(
+        status_code, json.dumps({"error": {"code": code, "message": "no"}})
+    )
 
 
-def _handler_over(endpoints: list, upstream: dict, *, retries: int = 3):
+def _handler_over(endpoints: list, upstream: dict) -> HandlerHarness:
     """A chat handler whose every upstream attempt answers `upstream`."""
-    load_balancer = AsyncMock()
-    load_balancer.endpoint_configs = {"gpt-3.5-turbo": endpoints}
-    load_balancer.select_endpoint.side_effect = list(endpoints)
-    llm_client = AsyncMock()
-    llm_client.create_chat_completion.return_value = upstream
-    config = LLMProxyConfig(
-        general_settings=GeneralSettings(
-            bind_port=5000,
-            redis_host="localhost",
-            redis_port=6379,
-            redis_password="",
-            num_retries=retries,
-            cache=False,
-        ),
-        model_groups=[],
+    harness = make_handler(endpoints=tuple(endpoints), model_group="gpt-3.5-turbo")
+    harness.load_balancer.select_endpoint.side_effect = list(endpoints)
+    harness.llm_client.create_chat_completion.return_value = upstream
+    return harness
+
+
+async def _fail_over(harness: HandlerHarness) -> dict:
+    return await harness.handler._execute_with_failover(
+        "gpt-3.5-turbo", REQUEST, make_context()
     )
-    handler = ChatCompletionHandler(
-        load_balancer=load_balancer,
-        cache_manager=AsyncMock(),
-        llm_client=llm_client,
-        config=config,
-    )
-    return handler, load_balancer, llm_client
 
 
 @pytest.mark.asyncio
@@ -389,49 +389,47 @@ async def test_a_refusal_reaches_the_caller_once_every_endpoint_was_tried(
     status_code,
 ):
     """Not a 503, which reads as an outage and invites a retry."""
-    handler, _balancer, client = _handler_over(
-        [_endpoint("https://a")], _upstream(status_code)
-    )
+    harness = _handler_over([_endpoint("a")], _upstream(status_code))
 
-    result = await handler._execute_with_failover("gpt-3.5-turbo", REQUEST)
+    result = await _fail_over(harness)
 
     assert result["status_code"] == status_code
     assert result["error"] == _upstream(status_code)["error"]
-    assert client.create_chat_completion.call_count == 1
+    assert harness.llm_client.create_chat_completion.call_count == 1
 
 
 @pytest.mark.asyncio
 async def test_a_refusal_reaches_the_caller_when_other_endpoints_are_unavailable():
-    first, second = _endpoint("https://a"), _endpoint("https://b")
-    handler, balancer, _client = _handler_over([first, second], _upstream(400))
+    first, second = _endpoint("a"), _endpoint("b")
+    harness = _handler_over([first, second], _upstream(400))
     # The second endpoint is cooling down, so there is nothing left to try.
-    balancer.select_endpoint.side_effect = [first, None]
+    harness.load_balancer.select_endpoint.side_effect = [first, None]
 
-    result = await handler._execute_with_failover("gpt-3.5-turbo", REQUEST)
+    result = await _fail_over(harness)
 
     assert result["status_code"] == 400
 
 
 @pytest.mark.asyncio
 async def test_every_endpoint_gets_a_chance_to_accept_a_refused_request():
-    endpoints = [_endpoint("https://a"), _endpoint("https://b")]
-    handler, _balancer, client = _handler_over(endpoints, _upstream(400))
+    harness = _handler_over([_endpoint("a"), _endpoint("b")], _upstream(400))
 
-    result = await handler._execute_with_failover("gpt-3.5-turbo", REQUEST)
+    result = await _fail_over(harness)
 
     assert result["status_code"] == 400
-    assert client.create_chat_completion.call_count == 2
+    assert harness.llm_client.create_chat_completion.call_count == 2
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status_code", [401, 403, 404])
-async def test_a_misconfigured_endpoint_is_still_the_proxys_failure(status_code):
+@pytest.mark.parametrize(
+    "status_code, code",
+    [(401, "invalid_api_key"), (403, "forbidden"), (404, "DeploymentNotFound")],
+)
+async def test_a_misconfigured_endpoint_is_still_the_proxys_failure(status_code, code):
     """A bad key or a missing deployment says nothing about the request."""
-    handler, _balancer, _client = _handler_over(
-        [_endpoint("https://a")], _upstream(status_code)
-    )
+    harness = _handler_over([_endpoint("a")], _upstream(status_code, code))
 
-    result = await handler._execute_with_failover("gpt-3.5-turbo", REQUEST)
+    result = await _fail_over(harness)
 
     assert result["status_code"] == 503
-    assert result["error_label"] == "invalid_json_schema"
+    assert result["error_label"] == code

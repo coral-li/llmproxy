@@ -11,7 +11,7 @@ from llmproxy.config_model import LLMProxyConfig
 from llmproxy.core.cache_manager import CacheManager
 from llmproxy.core.logger import get_logger
 from llmproxy.core.response_affinity import ResponseAffinityManager
-from llmproxy.core.usage_telemetry import UsageRecorder
+from llmproxy.core.usage_telemetry import UsageContext, UsageRecorder
 from llmproxy.managers.load_balancer import LoadBalancer
 from llmproxy.models.endpoint import Endpoint
 
@@ -54,59 +54,28 @@ class ResponseHandler(BaseRequestHandler):
                 model=model,
             )
 
-    async def _build_cached_streaming_response(
-        self,
-        cached_chunks: List[str],
-        request_data: dict,
-        start_time: float,
-        model: str,
-    ) -> StreamingResponse:
+    async def _cached_stream_lines(
+        self, cached_chunks: List[str], request_data: dict, model: str
+    ) -> AsyncIterator[str]:
+        """Replay a cached stream pinned to the endpoint that produced it.
+
+        Affinity is refreshed before the replay starts, so a follow-up to the
+        replayed response is routed back to the endpoint holding its state.
+        """
+        lines = await super()._cached_stream_lines(cached_chunks, request_data, model)
         endpoint_id = await self.cache_manager.get_affinity(request_data)
-        if endpoint_id:
-            response_id = self._extract_response_id_from_cached_chunks(cached_chunks)
-            if response_id:
-                await self.response_affinity_manager.set_endpoint_id(
-                    response_id, endpoint_id
-                )
-            else:
-                logger.debug(
-                    "cached_stream_missing_response_id",
-                    model=model,
-                )
+        if not endpoint_id:
+            logger.debug("cached_stream_missing_affinity", model=model)
+            return lines
 
-        async def stream_cached_lines() -> AsyncIterator[str]:
-            for chunk in cached_chunks:
-                yield chunk
-
-        stream_iter: AsyncIterator[str] = stream_cached_lines()
-        if endpoint_id:
-            stream_iter = self._wrap_stream_for_affinity(stream_iter, endpoint_id)
-        else:
-            logger.debug(
-                "cached_stream_missing_affinity",
-                model=model,
+        response_id = self._extract_response_id_from_cached_chunks(cached_chunks)
+        if response_id:
+            await self.response_affinity_manager.set_endpoint_id(
+                response_id, endpoint_id
             )
-
-        async def stream_cached_response() -> AsyncIterator[bytes]:
-            async for line in stream_iter:
-                yield line.encode("utf-8")
-
-        logger.info(
-            "serving_cached_streaming_response",
-            model=model,
-            num_chunks=len(cached_chunks),
-            latency_ms=int((time.time() - start_time) * 1000),
-        )
-        return StreamingResponse(
-            stream_cached_response(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-                "X-Proxy-Cache-Hit": "true",
-                "X-Proxy-Latency-Ms": str(int((time.time() - start_time) * 1000)),
-            },
-        )
+        else:
+            logger.debug("cached_stream_missing_response_id", model=model)
+        return self._wrap_stream_for_affinity(lines, endpoint_id)
 
     def _extract_response_id_from_cached_chunks(
         self, cached_chunks: List[str]
@@ -131,11 +100,17 @@ class ResponseHandler(BaseRequestHandler):
                 await self.cache_manager.set_affinity(request_data, endpoint_id)
 
     async def _build_streaming_response(
-        self, endpoint: Endpoint, request_data: dict, response: dict
+        self,
+        endpoint: Endpoint,
+        request_data: dict,
+        response: dict,
+        usage_context: UsageContext,
     ) -> StreamingResponse:
         if self._is_cache_enabled(request_data):
             await self.cache_manager.set_affinity(request_data, endpoint.id)
-        return await super()._build_streaming_response(endpoint, request_data, response)
+        return await super()._build_streaming_response(
+            endpoint, request_data, response, usage_context
+        )
 
     async def _make_request(
         self, endpoint: Endpoint, request_data: dict, is_streaming: bool
@@ -217,48 +192,27 @@ class ResponseHandler(BaseRequestHandler):
             }
 
     async def _execute_with_failover(
-        self, model_group: str, request_data: dict
+        self, model_group: str, request_data: dict, usage_context: UsageContext
     ) -> Union[Dict[Any, Any], StreamingResponse]:
         endpoint = await self._resolve_affinity_endpoint(model_group, request_data)
         if endpoint is None:
-            return await super()._execute_with_failover(model_group, request_data)
+            return await super()._execute_with_failover(
+                model_group, request_data, usage_context
+            )
 
-        is_streaming = request_data.get("stream", False)
+        # A follow-up can only be served by the endpoint holding its state, so
+        # every retry goes back to that endpoint.
         last_response = None
-
-        # The affinity path retries one pinned endpoint, so the attempt index is
-        # the attempt count.
         for attempt in range(self.config.general_settings.num_retries):
-            try:
-                response = self._stamp_attempt(
-                    await self._make_request(endpoint, request_data, is_streaming),
-                    endpoint,
-                    attempt + 1,
-                )
-                if is_streaming and response.get("status_code") == 200:
-                    return await self._build_streaming_response(
-                        endpoint, request_data, response
-                    )
-                if response["status_code"] == 200:
-                    await self.load_balancer.record_success(endpoint)
-                    return response
-                last_response = await self._handle_error_response(
-                    endpoint,
-                    response,
-                    request_data,
-                    model_group,
-                    attempt,
-                    is_streaming,
-                )
-            except Exception as exc:
-                last_response = self._stamp_attempt(
-                    await self._handle_exception(endpoint, exc, is_streaming),
-                    endpoint,
-                    attempt + 1,
-                )
+            outcome = await self._attempt(
+                endpoint, request_data, model_group, attempt, usage_context
+            )
+            if isinstance(outcome, StreamingResponse) or outcome["status_code"] == 200:
+                return outcome
+            last_response = outcome
 
         # Only reachable with retries configured to zero: nothing was tried.
-        return last_response or self._all_endpoints_failed_response(attempts=0)
+        return last_response or self._all_endpoints_failed_response(0, None)
 
     async def _resolve_affinity_endpoint(
         self, model_group: str, request_data: dict

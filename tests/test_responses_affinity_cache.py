@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from handler_harness import make_context
 
 from llmproxy.api.responses import ResponseHandler
 
@@ -33,6 +34,7 @@ async def test_cached_stream_refreshes_affinity():
         True,
         time.time(),
         "gpt-3.5-turbo",
+        make_context(api_surface="responses", streaming=True),
     )
 
     assert response is not None

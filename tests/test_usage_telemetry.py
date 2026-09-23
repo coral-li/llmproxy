@@ -6,26 +6,30 @@ import random
 import string
 import time
 import uuid
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
-from unittest.mock import AsyncMock
+from typing import Any, AsyncIterator, Callable, List
 
 import anyio
 import pytest
 import redis as sync_redis
 import requests
 from fastapi import HTTPException
+from handler_harness import (
+    FakeRedis,
+    cache_config,
+    drain,
+    general_settings,
+    make_context,
+    make_endpoint,
+    make_handler,
+    make_recorder,
+    upstream_error,
+)
 from pydantic import ValidationError
 
-from llmproxy.api.chat_completions import ChatCompletionHandler
 from llmproxy.api.embeddings import EmbeddingHandler
 from llmproxy.api.responses import ResponseHandler
 from llmproxy.clients.llm_client import LLMClient
-from llmproxy.config_model import (
-    CacheParams,
-    GeneralSettings,
-    LLMProxyConfig,
-    UsageStreamParams,
-)
+from llmproxy.config_model import UsageStreamParams
 from llmproxy.core import usage_telemetry
 from llmproxy.core.usage_telemetry import (
     ServedBy,
@@ -37,7 +41,6 @@ from llmproxy.core.usage_telemetry import (
     extract_reasoning_effort,
     normalize_usage,
 )
-from llmproxy.models.endpoint import Endpoint
 
 #: Every field a record carries; `error` is added only when the call failed.
 RECORD_FIELDS = {
@@ -63,122 +66,8 @@ CHAT_USAGE_CHUNK = (
 )
 
 
-class FakeRedis:
-    """Minimal stand-in capturing XADD calls, optionally failing some of them."""
-
-    def __init__(self, fail_first: int = 0) -> None:
-        self.entries: List[Dict[str, Any]] = []
-        self.fail_first = fail_first
-        self.calls = 0
-
-    async def xadd(
-        self,
-        stream_key: str,
-        fields: Dict[str, str],
-        maxlen: Optional[int] = None,
-        approximate: bool = True,
-    ) -> str:
-        self.calls += 1
-        if self.calls <= self.fail_first:
-            raise ConnectionError("redis is down")
-        self.entries.append(
-            {
-                "stream_key": stream_key,
-                "fields": fields,
-                "maxlen": maxlen,
-                "approximate": approximate,
-            }
-        )
-        return f"{self.calls}-0"
-
-    def records(self) -> List[dict]:
-        return [json.loads(entry["fields"]["payload"]) for entry in self.entries]
-
-
-def make_recorder(redis: Optional[FakeRedis] = None, **params: Any) -> tuple:
-    redis = redis or FakeRedis()
-    return UsageRecorder(redis, UsageStreamParams(**params)), redis
-
-
-def make_context(**overrides: Any) -> UsageContext:
-    defaults: Dict[str, Any] = {
-        "api_surface": "responses",
-        "model_group": "gpt-5",
-        "streaming": False,
-    }
-    defaults.update(overrides)
-    return UsageContext(**defaults)
-
-
-def make_endpoint(host: str, model: str = "m") -> Endpoint:
-    return Endpoint(model=model, weight=1, params={"base_url": f"https://{host}"})
-
-
-def make_handler(
-    handler_class: Callable[..., Any] = ChatCompletionHandler,
-    *,
-    endpoints: tuple = (),
-    cache: bool = False,
-    retries: int = 3,
-    caller_headers: tuple = (),
-) -> tuple:
-    """A real handler over mocked dependencies, recording into a fake stream."""
-    recorder, redis = make_recorder(caller_headers=list(caller_headers))
-    load_balancer = AsyncMock()
-    load_balancer.get_model_groups = lambda: ["m"]
-    load_balancer.endpoint_configs = {"m": list(endpoints)}
-    cache_manager = AsyncMock()
-    cache_manager._should_cache = lambda _request: cache
-    cache_manager.get.return_value = None
-    cache_manager.get_streaming.return_value = None
-    llm_client = AsyncMock()
-    config = LLMProxyConfig(
-        general_settings=GeneralSettings(
-            bind_port=5000,
-            redis_host="localhost",
-            redis_port=6379,
-            redis_password="",
-            num_retries=retries,
-            cache=cache,
-        ),
-        model_groups=[],
-    )
-    extra = (
-        {"response_affinity_manager": AsyncMock()}
-        if handler_class is ResponseHandler
-        else {}
-    )
-    handler = handler_class(
-        load_balancer=load_balancer,
-        cache_manager=cache_manager,
-        llm_client=llm_client,
-        config=config,
-        usage_recorder=recorder,
-        **extra,
-    )
-    return handler, load_balancer, cache_manager, llm_client, recorder, redis
-
-
-def upstream_error(status_code: int, body: str) -> dict:
-    return {"status_code": status_code, "error": body, "headers": {}, "data": None}
-
-
-def general_settings(**overrides: Any) -> GeneralSettings:
-    return GeneralSettings(
-        bind_port=5000,
-        redis_host="localhost",
-        redis_port=6379,
-        redis_password="",
-        **overrides,
-    )
-
-
-def cache_config(**overrides: Any) -> CacheParams:
-    return CacheParams(host="localhost", port=6379, password="", **overrides)
-
-
-async def drain(stream: AsyncIterator[Any]) -> List[Any]:
-    return [chunk async for chunk in stream]
+def ok(data: dict) -> dict:
+    return {"status_code": 200, "headers": {}, "data": data}
 
 
 class TestNormalizeUsage:
@@ -676,20 +565,13 @@ class TestStreamObservation:
         assert record["status_code"] == 502
         assert record["error"] == "server_error"
 
-    @pytest.mark.parametrize(
-        "recorder, context",
-        [
-            pytest.param(UsageRecorder.disabled(), make_context(), id="disabled"),
-            pytest.param(make_recorder()[0], None, id="no-request-context"),
-        ],
-    )
-    def test_the_stream_is_passed_through_untouched(self, recorder, context):
+    def test_a_disabled_recorder_passes_the_stream_through_untouched(self):
         async def source() -> AsyncIterator[str]:
             yield "data: x\n\n"
 
         original = source()
-        wrapped = recorder.observe_stream(
-            original, context, attempts=1, served_by=ServedBy()
+        wrapped = UsageRecorder.disabled().observe_stream(
+            original, make_context(), attempts=1, served_by=ServedBy()
         )
         assert wrapped is original
 
@@ -700,23 +582,16 @@ class TestAttemptsAndEndpointReporting:
     @pytest.mark.asyncio
     async def test_success_after_failover_names_the_endpoint_that_served(self):
         first, second = make_endpoint("a"), make_endpoint("b")
-        handler, load_balancer, _cache, client, recorder, redis = make_handler(
-            endpoints=(first, second)
-        )
-        load_balancer.select_endpoint.side_effect = [first, second]
-        client.create_chat_completion.side_effect = [
+        harness = make_handler(endpoints=(first, second))
+        harness.load_balancer.select_endpoint.side_effect = [first, second]
+        harness.llm_client.create_chat_completion.side_effect = [
             upstream_error(500, "boom"),
-            {
-                "status_code": 200,
-                "headers": {},
-                "data": {"choices": [], "usage": {"prompt_tokens": 4}},
-            },
+            ok({"choices": [], "usage": {"prompt_tokens": 4}}),
         ]
 
-        await handler.handle_request({"model": "m", "messages": []})
-        await recorder.flush()
+        await harness.handler.handle_request({"model": "m", "messages": []})
 
-        (record,) = redis.records()
+        record = await harness.only_record()
         assert record["status_code"] == 200
         assert record["attempts"] == 2
         assert record["endpoint_id"] == second.id
@@ -725,15 +600,14 @@ class TestAttemptsAndEndpointReporting:
 
     @pytest.mark.asyncio
     async def test_no_endpoint_available_records_zero_attempts(self):
-        handler, load_balancer, *_, recorder, redis = make_handler()
-        load_balancer.select_endpoint.return_value = None
+        harness = make_handler()
+        harness.load_balancer.select_endpoint.return_value = None
 
         with pytest.raises(HTTPException) as raised:
-            await handler.handle_request({"model": "m", "messages": []})
+            await harness.handler.handle_request({"model": "m", "messages": []})
 
         assert raised.value.status_code == 503
-        await recorder.flush()
-        (record,) = redis.records()
+        record = await harness.only_record()
         assert record["status_code"] == 503
         assert record["attempts"] == 0
         assert record["error"] == "no_available_endpoints"
@@ -742,19 +616,20 @@ class TestAttemptsAndEndpointReporting:
     @pytest.mark.asyncio
     async def test_running_out_of_endpoints_after_a_failure_keeps_the_attempt(self):
         failed = make_endpoint("a")
-        handler, load_balancer, _cache, client, recorder, redis = make_handler(
+        harness = make_handler(
             endpoints=(failed, make_endpoint("b"), make_endpoint("c"))
         )
         # The one tried endpoint fails, and the rest are cooling down.
-        load_balancer.select_endpoint.side_effect = [failed, None]
-        client.create_chat_completion.return_value = upstream_error(500, "boom")
+        harness.load_balancer.select_endpoint.side_effect = [failed, None]
+        harness.llm_client.create_chat_completion.return_value = upstream_error(
+            500, "boom"
+        )
 
         with pytest.raises(HTTPException) as raised:
-            await handler.handle_request({"model": "m", "messages": []})
+            await harness.handler.handle_request({"model": "m", "messages": []})
 
         assert raised.value.status_code == 503
-        await recorder.flush()
-        (record,) = redis.records()
+        record = await harness.only_record()
         assert record["attempts"] == 1
         assert record["endpoint_id"] == failed.id
         assert record["error"] == "http_500"
@@ -762,20 +637,17 @@ class TestAttemptsAndEndpointReporting:
     @pytest.mark.asyncio
     async def test_an_upstream_failure_records_its_code_not_its_text(self):
         endpoints = (make_endpoint("a"), make_endpoint("b"), make_endpoint("c"))
-        handler, load_balancer, _cache, client, recorder, redis = make_handler(
-            endpoints=endpoints
-        )
-        load_balancer.select_endpoint.side_effect = list(endpoints)
-        client.create_chat_completion.return_value = upstream_error(
+        harness = make_handler(endpoints=endpoints)
+        harness.load_balancer.select_endpoint.side_effect = list(endpoints)
+        harness.llm_client.create_chat_completion.return_value = upstream_error(
             400,
             '{"error": {"code": "content_filter", "message": "Prompt: Jane Doe"}}',
         )
 
         with pytest.raises(HTTPException):
-            await handler.handle_request({"model": "m", "messages": []})
+            await harness.handler.handle_request({"model": "m", "messages": []})
 
-        await recorder.flush()
-        (record,) = redis.records()
+        record = await harness.only_record()
         assert record["status_code"] == 400
         assert record["attempts"] == 3
         assert record["error"] == "content_filter"
@@ -785,18 +657,17 @@ class TestAttemptsAndEndpointReporting:
     async def test_exhaustion_is_attributed_to_the_last_endpoint_tried(self):
         """With one endpoint per group every upstream failure ends this way."""
         only = make_endpoint("a")
-        handler, load_balancer, _cache, client, recorder, redis = make_handler(
-            endpoints=(only,)
+        harness = make_handler(endpoints=(only,))
+        harness.load_balancer.select_endpoint.return_value = only
+        harness.llm_client.create_chat_completion.return_value = upstream_error(
+            429, "slow down"
         )
-        load_balancer.select_endpoint.return_value = only
-        client.create_chat_completion.return_value = upstream_error(429, "slow down")
 
         with pytest.raises(HTTPException) as raised:
-            await handler.handle_request({"model": "m", "messages": []})
+            await harness.handler.handle_request({"model": "m", "messages": []})
 
         assert raised.value.status_code == 503
-        await recorder.flush()
-        (record,) = redis.records()
+        record = await harness.only_record()
         assert record["status_code"] == 503
         assert record["attempts"] == 1
         assert record["endpoint_base_url"] == "https://a"
@@ -805,20 +676,17 @@ class TestAttemptsAndEndpointReporting:
     @pytest.mark.asyncio
     async def test_a_refusal_on_the_only_endpoint_is_recorded_as_a_refusal(self):
         only = make_endpoint("a")
-        handler, load_balancer, _cache, client, recorder, redis = make_handler(
-            endpoints=(only,)
-        )
-        load_balancer.select_endpoint.return_value = only
-        client.create_chat_completion.return_value = upstream_error(
+        harness = make_handler(endpoints=(only,))
+        harness.load_balancer.select_endpoint.return_value = only
+        harness.llm_client.create_chat_completion.return_value = upstream_error(
             400, '{"error": {"code": "invalid_json_schema", "message": "no"}}'
         )
 
         with pytest.raises(HTTPException) as raised:
-            await handler.handle_request({"model": "m", "messages": []})
+            await harness.handler.handle_request({"model": "m", "messages": []})
 
         assert raised.value.status_code == 400
-        await recorder.flush()
-        (record,) = redis.records()
+        record = await harness.only_record()
         assert record["status_code"] == 400
         assert record["attempts"] == 1
         assert record["endpoint_base_url"] == "https://a"
@@ -827,19 +695,19 @@ class TestAttemptsAndEndpointReporting:
     @pytest.mark.asyncio
     async def test_a_streaming_request_that_cannot_connect_is_recorded(self):
         endpoint = make_endpoint("a")
-        handler, load_balancer, _cache, client, recorder, redis = make_handler(
-            endpoints=(endpoint,), retries=1
+        harness = make_handler(endpoints=(endpoint,), retries=1)
+        harness.load_balancer.select_endpoint.return_value = endpoint
+        harness.llm_client.create_chat_completion.side_effect = RuntimeError(
+            "connect failed"
         )
-        load_balancer.select_endpoint.return_value = endpoint
-        client.create_chat_completion.side_effect = RuntimeError("connect failed")
 
         with pytest.raises(HTTPException) as raised:
-            await handler.handle_request({"model": "m", "messages": [], "stream": True})
+            await harness.handler.handle_request(
+                {"model": "m", "messages": [], "stream": True}
+            )
 
         assert raised.value.status_code == 500
-
-        await recorder.flush()
-        (record,) = redis.records()
+        record = await harness.only_record()
         assert record["status_code"] == 500
         assert record["attempts"] == 1
         assert record["error"] == "RuntimeError"
@@ -847,61 +715,44 @@ class TestAttemptsAndEndpointReporting:
     @pytest.mark.asyncio
     async def test_hostile_usage_cannot_fail_a_healthy_request(self):
         endpoint = make_endpoint("a")
-        handler, load_balancer, _cache, client, recorder, redis = make_handler(
-            endpoints=(endpoint,)
+        harness = make_handler(endpoints=(endpoint,))
+        harness.load_balancer.select_endpoint.return_value = endpoint
+        harness.llm_client.create_chat_completion.return_value = ok(
+            json.loads('{"choices": [], "usage": {"prompt_tokens": 1e999}}')
         )
-        load_balancer.select_endpoint.return_value = endpoint
-        client.create_chat_completion.return_value = {
-            "status_code": 200,
-            "headers": {},
-            "data": json.loads('{"choices": [], "usage": {"prompt_tokens": 1e999}}'),
-        }
 
-        body = await handler.handle_request({"model": "m", "messages": []})
+        body = await harness.handler.handle_request({"model": "m", "messages": []})
 
         assert body["choices"] == []
-        await recorder.flush()
-        (record,) = redis.records()
+        record = await harness.only_record()
         assert record["usage"]["input_tokens"] == 0
 
     @pytest.mark.asyncio
     async def test_caller_headers_are_read_from_the_request(self):
         endpoint = make_endpoint("a")
-        handler, load_balancer, _cache, client, recorder, redis = make_handler(
-            endpoints=(endpoint,), caller_headers=("x-coral-agent",)
-        )
-        load_balancer.select_endpoint.return_value = endpoint
-        client.create_chat_completion.return_value = {
-            "status_code": 200,
-            "headers": {},
-            "data": {"choices": []},
-        }
+        harness = make_handler(endpoints=(endpoint,), caller_headers=("x-coral-agent",))
+        harness.load_balancer.select_endpoint.return_value = endpoint
+        harness.llm_client.create_chat_completion.return_value = ok({"choices": []})
 
-        await handler.handle_request(
+        await harness.handler.handle_request(
             {"model": "m", "messages": []}, {"X-Coral-Agent": "classifier"}
         )
-        await recorder.flush()
 
-        (record,) = redis.records()
+        record = await harness.only_record()
         assert record["caller"] == {"x-coral-agent": "classifier"}
 
     @pytest.mark.asyncio
     async def test_embeddings_record_their_surface(self):
         endpoint = make_endpoint("a")
-        handler, load_balancer, _cache, client, recorder, redis = make_handler(
-            EmbeddingHandler, endpoints=(endpoint,)
+        harness = make_handler(EmbeddingHandler, endpoints=(endpoint,))
+        harness.load_balancer.select_endpoint.return_value = endpoint
+        harness.llm_client.create_embedding.return_value = ok(
+            {"data": [], "usage": {"prompt_tokens": 9, "total_tokens": 9}}
         )
-        load_balancer.select_endpoint.return_value = endpoint
-        client.create_embedding.return_value = {
-            "status_code": 200,
-            "headers": {},
-            "data": {"data": [], "usage": {"prompt_tokens": 9, "total_tokens": 9}},
-        }
 
-        await handler.handle_request({"model": "m", "input": "x"})
-        await recorder.flush()
+        await harness.handler.handle_request({"model": "m", "input": "x"})
 
-        (record,) = redis.records()
+        record = await harness.only_record()
         assert record["api_surface"] == "embeddings"
         assert record["usage"]["input_tokens"] == 9
         assert record["endpoint_id"] == endpoint.id
@@ -910,10 +761,8 @@ class TestAttemptsAndEndpointReporting:
     async def test_a_responses_stream_records_the_configured_model(self):
         """Upstreams report a dated snapshot; the record keeps the deployment."""
         endpoint = make_endpoint("a", model="gpt-5")
-        handler, load_balancer, _cache, client, recorder, redis = make_handler(
-            ResponseHandler, endpoints=(endpoint,)
-        )
-        load_balancer.select_endpoint.return_value = endpoint
+        harness = make_handler(ResponseHandler, endpoints=(endpoint,))
+        harness.load_balancer.select_endpoint.return_value = endpoint
 
         async def upstream() -> AsyncIterator[str]:
             yield "event: response.completed\n"
@@ -923,15 +772,14 @@ class TestAttemptsAndEndpointReporting:
                 '"usage":{"input_tokens":21,"output_tokens":5}}}\n\n'
             )
 
-        client.create_response.return_value = upstream()
+        harness.llm_client.create_response.return_value = upstream()
 
-        response = await handler.handle_request(
+        response = await harness.handler.handle_request(
             {"model": "m", "input": "hi", "stream": True}
         )
         await drain(response.body_iterator)
-        await recorder.flush()
 
-        (record,) = redis.records()
+        record = await harness.only_record()
         assert record["api_surface"] == "responses"
         assert record["usage"]["input_tokens"] == 21
         assert record["endpoint_model"] == "gpt-5"
@@ -940,32 +788,33 @@ class TestAttemptsAndEndpointReporting:
 class TestCacheHitRecording:
     @pytest.mark.asyncio
     async def test_a_streamed_hit_reports_what_the_cache_saved(self):
-        handler, _lb, cache_manager, _client, recorder, redis = make_handler(cache=True)
-        cache_manager.get_streaming.return_value = [
+        harness = make_handler(cache=True)
+        harness.cache_manager.get_streaming.return_value = [
             CHAT_USAGE_CHUNK,
             "data: [DONE]\n\n",
         ]
 
-        response = await handler.handle_request(
+        response = await harness.handler.handle_request(
             {"model": "m", "messages": [], "stream": True}
         )
         await drain(response.body_iterator)
-        await recorder.flush()
 
-        (record,) = redis.records()
+        record = await harness.only_record()
         assert record["cache_hit"] is True
         assert record["attempts"] == 0
         assert record["usage"]["input_tokens"] == 11
 
     @pytest.mark.asyncio
     async def test_a_hit_reports_the_cached_usage(self):
-        handler, _lb, cache_manager, _client, recorder, redis = make_handler(cache=True)
-        cache_manager.get.return_value = {"choices": [], "usage": {"prompt_tokens": 7}}
+        harness = make_handler(cache=True)
+        harness.cache_manager.get.return_value = {
+            "choices": [],
+            "usage": {"prompt_tokens": 7},
+        }
 
-        await handler.handle_request({"model": "m", "messages": []})
-        await recorder.flush()
+        await harness.handler.handle_request({"model": "m", "messages": []})
 
-        (record,) = redis.records()
+        record = await harness.only_record()
         assert record["cache_hit"] is True
         assert record["attempts"] == 0
         assert record["endpoint_id"] is None
@@ -973,16 +822,16 @@ class TestCacheHitRecording:
 
     @pytest.mark.asyncio
     async def test_a_responses_hit_is_recorded_once(self):
-        handler, _lb, cache_manager, _client, recorder, redis = make_handler(
-            ResponseHandler, cache=True
-        )
-        cache_manager.get.return_value = {"output": [], "usage": {"input_tokens": 5}}
-        cache_manager.get_affinity.return_value = None
+        harness = make_handler(ResponseHandler, cache=True)
+        harness.cache_manager.get.return_value = {
+            "output": [],
+            "usage": {"input_tokens": 5},
+        }
+        harness.cache_manager.get_affinity.return_value = None
 
-        await handler.handle_request({"model": "m", "input": "hi"})
-        await recorder.flush()
+        await harness.handler.handle_request({"model": "m", "input": "hi"})
 
-        (record,) = redis.records()
+        record = await harness.only_record()
         assert record["api_surface"] == "responses"
         assert record["cache_hit"] is True
         assert record["usage"]["input_tokens"] == 5

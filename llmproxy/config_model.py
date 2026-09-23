@@ -4,8 +4,9 @@ from pydantic import BaseModel, Field, model_validator
 
 DEFAULT_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024
 DEFAULT_MAX_CACHE_ENTRY_BYTES = 64 * 1024 * 1024
-#: Prefix of every response-cache key. `DELETE /cache` removes everything under
-#: it, so nothing that has to survive a cache clear may be stored there.
+#: Default prefix of response-cache keys, `cache_params.namespace`. `DELETE
+#: /cache` removes everything under the configured prefix, so nothing that has
+#: to survive a cache clear may be stored there.
 RESPONSE_CACHE_NAMESPACE = "llmproxy"
 
 
