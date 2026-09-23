@@ -5,7 +5,7 @@ LLMProxy is a FastAPI-based proxy that load balances across multiple Large Langu
 ## Why LLMProxy?
 
 - **Provider-agnostic**: Register OpenAI, Azure OpenAI, and any OpenAI-compatible endpoints in a single configuration.
-- **Graceful failover**: Automatically detect failing upstreams, cool them down, and retry requests against healthy endpoints.
+- **Graceful failover**: Automatically detect failing upstreams, cool them down, and retry requests against healthy endpoints. A request every endpoint refuses (400, 413, 422) comes back to the caller as that refusal, not as a 503.
 - **Observability built in**: Health and statistics endpoints expose live state; Redis-backed state tracking keeps multiple proxy instances in sync.
 - **Deterministic caching**: Cache both regular and streaming responses in Redis with fine-grained controls and manual cache invalidation.
 - **Drop-in OpenAI compatibility**: Reuse existing SDK clients (chat completions, responses, embeddings) by only changing the base URL.
@@ -150,6 +150,31 @@ vector = embeddings.data[0].embedding
 - `GET /health`: readiness info, upstream counts, Redis state.
 - `GET /stats`: live per-endpoint statistics pulled from Redis.
 - `DELETE /cache`: invalidate cached responses (useful for testing).
+
+### Usage Telemetry
+
+`/stats` reports live endpoint health, which expires with the endpoint state
+TTL. For durable per-request accounting — token counts, cost inputs, reasoning
+effort, which endpoint actually served, and cache-hit rate — enable the
+`usage_stream` block to append one record per request to a Redis Stream:
+
+```yaml
+general_settings:
+  usage_stream:
+    enabled: True
+    stream_key: "llmproxy-telemetry:usage"
+    caller_headers:
+      - x-coral-agent
+      - x-coral-run-id
+```
+
+Callers attribute their own traffic with the request headers listed in
+`caller_headers`; headers that carry credentials cannot be listed. Telemetry is
+disabled when the block is absent, and a Redis failure never affects the
+proxied request.
+
+See [docs/usage-telemetry.md](docs/usage-telemetry.md) for the record shape,
+how to size the stream, and how to consume it.
 
 ## Configuration Deep Dive
 

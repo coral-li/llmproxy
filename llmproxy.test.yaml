@@ -41,3 +41,11 @@ general_settings:
     type: redis
     ttl: 300  # 5 minutes for testing
     namespace: "llmproxy.test"
+
+  usage_stream:
+    enabled: true
+    stream_key: "llmproxy-telemetry:test:usage"
+    max_len: 1000
+    caller_headers:
+      - x-coral-agent
+      - x-coral-run-id

@@ -1,5 +1,7 @@
 import json
+import uuid
 
+import pytest
 import redis.asyncio as redis
 
 from llmproxy.core.cache_manager import CacheManager, StreamingCacheWriter
@@ -221,6 +223,33 @@ def test_reconstruct_responses_stream_handles_response_done_chunks():
     assert outputs and outputs[0].get("id") == "msg_original"
 
 
+def test_replayed_responses_stream_keeps_the_original_usage():
+    """A cache hit still reports what the call it replays consumed."""
+    cache_manager = CacheManager(redis.Redis(), cache_enabled=False)
+    writer = StreamingCacheWriter(cache_manager, {}, is_responses_api=True)
+    usage = {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150}
+    completed = {
+        "type": "response.completed",
+        "response": {"id": "resp_1", "model": "gpt-5", "output": [], "usage": usage},
+    }
+
+    normalized = writer._parse_responses_event(
+        f"event: response.completed\ndata: {json.dumps(completed)}\n\n"
+    )
+    assert normalized is not None
+    reconstructed = cache_manager._reconstruct_responses_stream([normalized.to_dict()])
+
+    data_events = [
+        json.loads(line[len("data: ") :].strip())
+        for line in reconstructed
+        if line.startswith("data: ")
+    ]
+    completed_event = next(
+        event for event in data_events if event.get("type") == "response.completed"
+    )
+    assert completed_event["response"]["usage"] == usage
+
+
 def test_completed_outputs_preserve_encrypted_content():
     """Completed outputs should preserve encrypted reasoning content for cache replay."""
     cache_manager = CacheManager(redis.Redis(), cache_enabled=False)
@@ -237,3 +266,31 @@ def test_completed_outputs_preserve_encrypted_content():
 
     cleaned = writer._clean_completed_outputs(outputs)
     assert cleaned[0].get("encrypted_content") == "enc-abc"
+
+
+class TestClearingTheCache:
+    """`DELETE /cache` clears its own namespace, whatever characters it holds."""
+
+    @pytest.mark.parametrize("suffix", ["*", "?", "[a-z]", "\\x"])
+    async def test_only_the_namespaces_own_keys_are_deleted(self, suffix):
+        prefix = f"cache-clear-{uuid.uuid4().hex}"
+        namespace = prefix + suffix
+        own = f"{namespace}:entry"
+        # Unescaped, the pattern for each namespace here matches some of these.
+        usage_stream = f"{prefix}-telemetry:usage"
+        neighbours = [f"{prefix}a:entry", f"{prefix}x:entry"]
+        client = redis.Redis(host="localhost", port=6379, decode_responses=True)
+        try:
+            await client.set(own, "cached")
+            await client.xadd(usage_stream, {"payload": "{}"})
+            for key in neighbours:
+                await client.set(key, "unrelated")
+
+            deleted = await CacheManager(client, namespace=namespace).invalidate_all()
+
+            assert deleted == 1
+            assert await client.exists(own) == 0
+            assert await client.exists(usage_stream, *neighbours) == 3
+        finally:
+            await client.delete(own, usage_stream, *neighbours)
+            await client.aclose()

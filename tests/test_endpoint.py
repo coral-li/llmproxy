@@ -76,6 +76,16 @@ class TestEndpoint:
         assert endpoint.base_url == "openai"
         assert endpoint.is_azure is False
 
+    def test_upstream_base_url_is_where_requests_go(self):
+        """The `openai` label is not a URL; requests go to the OpenAI API."""
+        unset = Endpoint(model="gpt-3.5-turbo", weight=1, params={})
+        configured = Endpoint(
+            model="gpt-3.5-turbo", weight=1, params={"base_url": "https://a.test"}
+        )
+
+        assert unset.upstream_base_url == "https://api.openai.com"
+        assert configured.upstream_base_url == "https://a.test"
+
     def test_deterministic_id_generation(self):
         """Test that ID generation is deterministic"""
         params1 = {"api_key": "test-key", "base_url": "https://api.openai.com"}

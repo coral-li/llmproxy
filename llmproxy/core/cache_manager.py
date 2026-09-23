@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import re
 import time
 import uuid
 from typing import (
@@ -21,6 +22,14 @@ from .logger import get_logger
 from .redis_utils import await_redis_result
 
 logger = get_logger(__name__)
+
+#: Characters `SCAN MATCH` reads as pattern syntax rather than as themselves.
+_REDIS_PATTERN_SYNTAX = re.compile(r"([*?\[\]\\])")
+
+
+def _literal_pattern(text: str) -> str:
+    """Escape `text` so a Redis pattern matches it character for character."""
+    return _REDIS_PATTERN_SYNTAX.sub(r"\\\1", text)
 
 
 class EventAwareChunk:
@@ -213,6 +222,9 @@ class _ResponsesStreamRebuilder:
 
         if "status_details" in metadata:
             response_payload["status_details"] = metadata.get("status_details")
+
+        if "usage" in metadata:
+            response_payload["usage"] = metadata["usage"]
 
         event_payload = {
             "type": "response.completed",
@@ -841,7 +853,9 @@ class CacheManager:
     async def invalidate_all(self) -> int:
         """Invalidate all cached entries for this namespace using SCAN + batched UNLINK/DEL"""
         try:
-            pattern = f"{self.namespace}:*"
+            # Escaped, so a namespace such as `llmproxy*` clears its own keys
+            # and nothing else: the literal prefix the config check assumes.
+            pattern = f"{_literal_pattern(self.namespace)}:*"
             batch_size = 500
 
             total_deleted = 0
@@ -1197,6 +1211,10 @@ class StreamingCacheWriter:
 
         if "status_details" in response:
             metadata["status_details"] = response.get("status_details")
+
+        # Kept so a replayed stream still reports what the original call used.
+        if isinstance(response.get("usage"), dict):
+            metadata["usage"] = response["usage"]
 
         return EventAwareChunk(
             event_type="response.completed",

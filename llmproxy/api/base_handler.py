@@ -1,23 +1,111 @@
 import time
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, Dict, Optional, Set, Tuple, Union
+from dataclasses import asdict
+from typing import (
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Set,
+    Tuple,
+    Union,
+)
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
-from llmproxy.api.error_handler import is_retryable_error
+from llmproxy.api.error_handler import (
+    ProxyRefusal,
+    is_request_error,
+    is_retryable_error,
+)
 from llmproxy.clients.llm_client import LLMClient
 from llmproxy.config_model import LLMProxyConfig
 from llmproxy.core.cache_manager import CacheManager
 from llmproxy.core.logger import get_logger
+from llmproxy.core.usage_telemetry import (
+    ServedBy,
+    UsageContext,
+    UsageRecorder,
+    error_code,
+    normalize_usage,
+    usage_from_chunks,
+)
 from llmproxy.managers.load_balancer import LoadBalancer
 from llmproxy.models.endpoint import Endpoint
 
 logger = get_logger(__name__)
 
+#: Headers on every streamed answer, so nothing between proxy and client
+#: buffers it.
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+def _elapsed_ms(start_time: float) -> int:
+    return int((time.time() - start_time) * 1000)
+
+
+def _served_by(endpoint: Endpoint) -> ServedBy:
+    return ServedBy(
+        endpoint_model=endpoint.model,
+        endpoint_id=endpoint.id,
+        endpoint_base_url=endpoint.upstream_base_url,
+    )
+
+
+async def _replay(chunks: List[str]) -> AsyncIterator[str]:
+    for chunk in chunks:
+        yield chunk
+
+
+def _error_label(response: dict) -> Optional[str]:
+    """Return a content-free label for why a response failed, or None.
+
+    Failures the proxy generates itself carry their own label; an upstream
+    failure is labelled with the provider's error code, or its status when it
+    sends none.
+    """
+    status_code = response.get("status_code", 500)
+    if status_code == 200:
+        return None
+    return (
+        response.get("error_label")
+        or error_code(response.get("error"))
+        or f"http_{status_code}"
+    )
+
+
+#: What a caller is told when an upstream answers 200 with a body that is not a
+#: JSON object, which none of the API surfaces here can return.
+_NON_OBJECT_BODY_DETAIL = "Invalid response data type"
+
+
+def _refuse_non_object_body(response: dict) -> dict:
+    """Turn a 200 whose body is not a JSON object into the 500 it ends as.
+
+    The caller is refused such a body, so caching it, or recording it as a
+    success, would report a request that the caller saw fail.
+    """
+    if response.get("status_code") != 200 or isinstance(response.get("data"), dict):
+        return response
+    return {
+        **response,
+        "status_code": 500,
+        "data": None,
+        "error": _NON_OBJECT_BODY_DETAIL,
+        "error_label": "invalid_response_body",
+    }
+
 
 class BaseRequestHandler(ABC):
     """Base class for request handlers with load balancing, caching, and retries"""
+
+    # Identifies the OpenAI-compatible surface this handler serves, so usage
+    # records can be split by API without inspecting the request body.
+    api_surface: str = "unknown"
 
     def __init__(
         self,
@@ -25,37 +113,56 @@ class BaseRequestHandler(ABC):
         cache_manager: CacheManager,
         llm_client: LLMClient,
         config: LLMProxyConfig,
+        usage_recorder: Optional[UsageRecorder] = None,
     ):
         self.load_balancer = load_balancer
         self.cache_manager = cache_manager
         self.llm_client = llm_client
         self.config = config
+        self.usage_recorder = usage_recorder or UsageRecorder.disabled()
 
     async def handle_request(
-        self, request_data: dict
+        self,
+        request_data: dict,
+        request_headers: Optional[Mapping[str, str]] = None,
     ) -> Union[Dict[Any, Any], StreamingResponse]:
         """Handle incoming request with caching and failover"""
         start_time = time.time()
-
-        model = request_data.get("model")
-        if not model:
-            raise HTTPException(400, "Model is required")
-        model_group = model
-        if model_group not in self.load_balancer.get_model_groups():
-            raise HTTPException(400, f"Model '{model}' not configured")
         is_streaming = request_data.get("stream", False)
 
-        # Check cache
-        cached_response = await self._check_cache(
-            request_data, is_streaming, start_time, model
+        usage_context = UsageContext.from_request(
+            api_surface=self.api_surface,
+            request_data=request_data,
+            caller=self.usage_recorder.caller_headers(request_headers),
+            start_time=start_time,
         )
-        if cached_response is not None:
-            return cached_response
 
-        # Execute request with retries
-        response = await self._execute_with_failover(model_group, request_data)
+        try:
+            model_group = self._served_model_group(request_data.get("model"))
 
-        # For streaming responses, return immediately
+            # Check cache; a hit is recorded where it is detected.
+            cached_response = await self._check_cache(
+                request_data, is_streaming, start_time, model_group, usage_context
+            )
+            if cached_response is not None:
+                return cached_response
+
+            # Execute request with retries
+            response = await self._execute_with_failover(
+                model_group, request_data, usage_context
+            )
+        except ProxyRefusal as refusal:
+            # Turned away before any upstream call, so no response carries it.
+            self.usage_recorder.record(
+                usage_context,
+                status_code=refusal.status_code,
+                attempts=0,
+                error=refusal.label,
+            )
+            raise
+
+        # For streaming responses, return immediately. The usage record is
+        # written by the stream observer once the stream ends.
         if is_streaming and isinstance(response, StreamingResponse):
             return response
 
@@ -65,8 +172,17 @@ class BaseRequestHandler(ABC):
                 500, "Unexpected response type for non-streaming request"
             )
 
+        # Finalizing refuses a body that is not a JSON object. Settle that
+        # first, so such a body is neither cached nor recorded as a success.
+        if not is_streaming:
+            response = _refuse_non_object_body(response)
+
         # Cache successful non-streaming responses
         await self._maybe_cache_response(request_data, is_streaming, response)
+
+        # Recorded before finalizing, which raises for anything but a 200 and
+        # would otherwise drop the record of every failure.
+        self._record_completed_response(usage_context, response)
 
         # Add proxy metadata
         self._add_proxy_metadata(response, start_time)
@@ -74,49 +190,125 @@ class BaseRequestHandler(ABC):
         # Return appropriate response
         return self._finalize_response(is_streaming, response)
 
+    def _served_model_group(self, model: Any) -> str:
+        """Return the model group a request names, refusing one not served here."""
+        if not model:
+            raise ProxyRefusal(400, "Model is required", label="model_required")
+        if (
+            not isinstance(model, str)
+            or model not in self.load_balancer.get_model_groups()
+        ):
+            raise ProxyRefusal(
+                400, f"Model '{model}' not configured", label="model_not_configured"
+            )
+        return model
+
+    def _record_cache_hit(
+        self, context: UsageContext, cached: Union[Dict[str, Any], List[str]]
+    ) -> None:
+        """Record a proxy cache hit, which consumes no upstream tokens.
+
+        The usage reported is what the cached body claims; consumers price on
+        `cache_hit` so a replayed response is not billed twice, and can use
+        these counts to quantify what the cache saved.
+        """
+        if not self.usage_recorder.enabled:
+            return
+        usage = (
+            normalize_usage(cached)
+            if isinstance(cached, dict)
+            else usage_from_chunks(cached)
+        )
+        self.usage_recorder.record(
+            context, status_code=200, attempts=0, usage=usage, cache_hit=True
+        )
+
+    def _record_completed_response(
+        self, usage_context: UsageContext, response: dict
+    ) -> None:
+        """Record the outcome of a non-streaming (or failed streaming) request."""
+        data = response.get("data")
+        self.usage_recorder.record(
+            usage_context,
+            status_code=response["status_code"],
+            attempts=response["attempts"],
+            served_by=ServedBy.from_response(response),
+            usage=normalize_usage(data) if isinstance(data, dict) else None,
+            error=_error_label(response),
+        )
+
     async def _check_cache(
-        self, request_data: dict, is_streaming: bool, start_time: float, model: str
+        self,
+        request_data: dict,
+        is_streaming: bool,
+        start_time: float,
+        model: str,
+        usage_context: UsageContext,
     ) -> Optional[Union[Dict[Any, Any], StreamingResponse]]:
-        """Check cache for existing response"""
+        """Serve a cached response if there is one, recording the hit."""
         # Short-circuit if caching is disabled for this request or globally.
         if not self._is_cache_enabled(request_data):
             return None
 
         if is_streaming:
             cached_chunks = await self.cache_manager.get_streaming(request_data)
-            if cached_chunks:
+            if not cached_chunks:
+                return None
+            streaming_response = await self._build_cached_streaming_response(
+                cached_chunks, request_data, start_time, model
+            )
+            self._record_cache_hit(usage_context, cached_chunks)
+            return streaming_response
 
-                async def stream_cached_response() -> AsyncGenerator[bytes, None]:
-                    for chunk in cached_chunks:
-                        yield chunk.encode("utf-8")
+        cached_response = await self.cache_manager.get(request_data)
+        if not cached_response:
+            return None
+        cached_response["_proxy_cache_hit"] = True
+        cached_response["_proxy_latency_ms"] = _elapsed_ms(start_time)
+        await self._on_cached_response(cached_response, request_data, model)
+        self._record_cache_hit(usage_context, cached_response)
+        return cached_response
 
-                logger.info(
-                    "serving_cached_streaming_response",
-                    model=model,
-                    num_chunks=len(cached_chunks),
-                    latency_ms=int((time.time() - start_time) * 1000),
-                )
-                return StreamingResponse(
-                    stream_cached_response(),
-                    media_type="text/event-stream",
-                    headers={
-                        "Cache-Control": "no-cache",
-                        "X-Accel-Buffering": "no",
-                        "X-Proxy-Cache-Hit": "true",
-                        "X-Proxy-Latency-Ms": str(
-                            int((time.time() - start_time) * 1000)
-                        ),
-                    },
-                )
-        if not is_streaming:
-            cached_response = await self.cache_manager.get(request_data)
-            if cached_response:
-                cached_response["_proxy_cache_hit"] = True
-                cached_response["_proxy_latency_ms"] = int(
-                    (time.time() - start_time) * 1000
-                )
-                return cached_response
-        return None
+    async def _build_cached_streaming_response(
+        self,
+        cached_chunks: List[str],
+        request_data: dict,
+        start_time: float,
+        model: str,
+    ) -> StreamingResponse:
+        """Replay a cached stream."""
+        lines = await self._cached_stream_lines(cached_chunks, request_data, model)
+
+        async def stream_cached_response() -> AsyncGenerator[bytes, None]:
+            async for line in lines:
+                yield line.encode("utf-8")
+
+        logger.info(
+            "serving_cached_streaming_response",
+            model=model,
+            num_chunks=len(cached_chunks),
+            latency_ms=_elapsed_ms(start_time),
+        )
+        return StreamingResponse(
+            stream_cached_response(),
+            media_type="text/event-stream",
+            headers={
+                **_SSE_HEADERS,
+                "X-Proxy-Cache-Hit": "true",
+                "X-Proxy-Latency-Ms": str(_elapsed_ms(start_time)),
+            },
+        )
+
+    async def _cached_stream_lines(
+        self, cached_chunks: List[str], request_data: dict, model: str
+    ) -> AsyncIterator[str]:
+        """The lines a cached stream replays; a subclass may wrap them."""
+        return _replay(cached_chunks)
+
+    async def _on_cached_response(
+        self, cached_response: dict, request_data: dict, model: str
+    ) -> None:
+        """Hook run when a non-streaming response is served from cache."""
 
     async def _maybe_cache_response(
         self, request_data: dict, is_streaming: bool, response: dict
@@ -132,11 +324,10 @@ class BaseRequestHandler(ABC):
 
     def _add_proxy_metadata(self, response: dict, start_time: float) -> None:
         """Add proxy metadata to response"""
-        if response.get("data"):
+        # A failed streaming attempt carries an error stream here, not a body.
+        if isinstance(response.get("data"), dict):
             response["data"]["_proxy_cache_hit"] = False
-            response["data"]["_proxy_latency_ms"] = int(
-                (time.time() - start_time) * 1000
-            )
+            response["data"]["_proxy_latency_ms"] = _elapsed_ms(start_time)
             if response.get("endpoint_base_url"):
                 response["data"]["_proxy_endpoint_base_url"] = response[
                     "endpoint_base_url"
@@ -160,7 +351,7 @@ class BaseRequestHandler(ABC):
                 if isinstance(data, dict):
                     return data
                 else:
-                    raise HTTPException(500, "Invalid response data type")
+                    raise HTTPException(500, _NON_OBJECT_BODY_DETAIL)
             else:
                 raise HTTPException(
                     status_code=response["status_code"],
@@ -171,6 +362,7 @@ class BaseRequestHandler(ABC):
         self,
         model_group: str,
         request_data: dict,
+        usage_context: UsageContext,
     ) -> Union[Dict[Any, Any], StreamingResponse]:
         """Execute request with automatic failover on errors"""
 
@@ -186,7 +378,6 @@ class BaseRequestHandler(ABC):
             total_endpoints = 0
         max_selection_attempts = max(10, total_endpoints * 2)
 
-        is_streaming = request_data.get("stream", False)
         last_response = None
 
         for attempt in range(self.config.general_settings.num_retries):
@@ -219,32 +410,70 @@ class BaseRequestHandler(ABC):
                         attempt=attempt + 1,
                     )
                     break
-                return self._no_endpoint_response(model_group)
+                return self._no_endpoint_response(
+                    model_group, len(attempted_endpoints), last_response
+                )
 
             attempted_endpoints.add(endpoint.id)
-            try:
-                response = await self._make_request(
-                    endpoint, request_data, is_streaming
-                )
-                if is_streaming and response.get("status_code") == 200:
-                    return await self._build_streaming_response(
-                        endpoint, request_data, response
-                    )
-                if response["status_code"] == 200:
-                    await self.load_balancer.record_success(endpoint)
-                    response["endpoint_base_url"] = endpoint.params.get(
-                        "base_url", "https://api.openai.com"
-                    )
-                    response["endpoint_id"] = endpoint.id
-                    return response
-                last_response = await self._handle_error_response(
+            outcome = await self._attempt(
+                endpoint, request_data, model_group, attempt, usage_context
+            )
+            if isinstance(outcome, StreamingResponse) or outcome["status_code"] == 200:
+                return outcome
+            last_response = outcome
+        if endpoints_exhausted or last_response is None:
+            return self._all_endpoints_failed_response(
+                len(attempted_endpoints), last_response
+            )
+        return last_response
+
+    async def _attempt(
+        self,
+        endpoint: Endpoint,
+        request_data: dict,
+        model_group: str,
+        attempt: int,
+        usage_context: UsageContext,
+    ) -> Union[Dict[Any, Any], StreamingResponse]:
+        """Send the request to `endpoint` as attempt number `attempt`, from 0.
+
+        A success comes back ready to serve, and a failure comes back for the
+        caller to fail over from. Either way the attempt is stamped with its
+        endpoint and with the number of upstream requests made so far.
+        """
+        is_streaming = request_data.get("stream", False)
+        try:
+            response = self._stamp_attempt(
+                await self._make_request(endpoint, request_data, is_streaming),
+                endpoint,
+                attempt + 1,
+            )
+            if response["status_code"] != 200:
+                return await self._handle_error_response(
                     endpoint, response, request_data, model_group, attempt, is_streaming
                 )
-            except Exception as e:
-                last_response = await self._handle_exception(endpoint, e, is_streaming)
-        if endpoints_exhausted:
-            return self._all_endpoints_failed_response()
-        return last_response or self._all_endpoints_failed_response()
+            if is_streaming:
+                return await self._build_streaming_response(
+                    endpoint, request_data, response, usage_context
+                )
+            await self.load_balancer.record_success(endpoint)
+            return response
+        except Exception as e:
+            return self._stamp_attempt(
+                await self._handle_exception(endpoint, e, is_streaming),
+                endpoint,
+                attempt + 1,
+            )
+
+    @staticmethod
+    def _stamp_attempt(response: dict, endpoint: Endpoint, attempts: int) -> dict:
+        """Record on a response which endpoint it came from and the attempt count.
+
+        Failures are stamped as well as successes: a failed call that names no
+        endpoint is invisible to anything measuring per-endpoint reliability.
+        """
+        response.update(asdict(_served_by(endpoint)), attempts=attempts)
+        return response
 
     async def _select_candidate_endpoint(
         self,
@@ -265,21 +494,25 @@ class BaseRequestHandler(ABC):
             return candidate, False, duplicate_attempts
         return None, True, duplicate_attempts
 
-    def _no_endpoint_response(self, model_group: str) -> dict:
+    def _no_endpoint_response(
+        self, model_group: str, attempts: int, last_attempt: Optional[dict]
+    ) -> dict:
         """Response when no endpoints are available"""
         logger.error("no_endpoint_available", model_group=model_group)
-        return {
-            "status_code": 503,
-            "headers": {},
-            "data": None,
-            "error": "No available endpoints",
-        }
+        return self._out_of_endpoints(
+            "No available endpoints", "no_available_endpoints", attempts, last_attempt
+        )
 
     async def _build_streaming_response(
-        self, endpoint: Endpoint, request_data: dict, response: dict
+        self,
+        endpoint: Endpoint,
+        request_data: dict,
+        response: dict,
+        usage_context: UsageContext,
     ) -> StreamingResponse:
         """Build streaming response with caching support"""
         # Only cache if globally enabled AND not disabled per-request
+        stream: AsyncIterator[Any]
         if self._is_cache_enabled(request_data):
             cache_writer = await self.cache_manager.create_streaming_cache_writer(
                 request_data
@@ -293,15 +526,19 @@ class BaseRequestHandler(ABC):
         else:
             stream = response["data"]
 
+        stream = self.usage_recorder.observe_stream(
+            stream,
+            usage_context,
+            attempts=response["attempts"],
+            served_by=_served_by(endpoint),
+        )
+
         return StreamingResponse(
             stream,
             media_type="text/event-stream",
             headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-                "X-Proxy-Endpoint-Base-Url": endpoint.params.get(
-                    "base_url", "https://api.openai.com"
-                ),
+                **_SSE_HEADERS,
+                "X-Proxy-Endpoint-Base-Url": endpoint.upstream_base_url,
                 "X-Proxy-Cache-Hit": "false",
             },
         )
@@ -381,22 +618,59 @@ class BaseRequestHandler(ABC):
                 # Final sentinel indicating stream completion
                 yield "data: [DONE]\n\n".encode("utf-8")
 
-            return {"status_code": 500, "data": error_stream()}
+            return {
+                "status_code": 500,
+                "data": error_stream(),
+                "error_label": type(e).__name__,
+            }
         return {
             "status_code": 500,
             "headers": {},
             "data": None,
             "error": str(e),
+            "error_label": type(e).__name__,
         }
 
-    def _all_endpoints_failed_response(self) -> dict:
+    def _all_endpoints_failed_response(
+        self, attempts: int, last_attempt: Optional[dict]
+    ) -> dict:
         """Response when all endpoints have failed"""
-        return {
+        return self._out_of_endpoints(
+            "All endpoints failed after retries",
+            "all_endpoints_failed",
+            attempts,
+            last_attempt,
+        )
+
+    @staticmethod
+    def _out_of_endpoints(
+        error: str, label: str, attempts: int, last_attempt: Optional[dict]
+    ) -> dict:
+        """The answer once no endpoint is left to try.
+
+        A request the last upstream refused would be refused by every endpoint,
+        so the caller gets that refusal rather than a 503 that reads as an
+        outage and invites a retry. Any other failure is a 503 that names the
+        endpoint tried last, and why it failed: with a single endpoint per
+        model group every upstream failure ends here, so without that the
+        endpoint that failed would be recorded nowhere.
+        """
+        if last_attempt is not None and is_request_error(last_attempt["status_code"]):
+            return last_attempt
+        failure = {
             "status_code": 503,
             "headers": {},
             "data": None,
-            "error": "All endpoints failed after retries",
+            "error": error,
+            "error_label": label,
+            "attempts": attempts,
         }
+        if last_attempt is not None:
+            failure.update(
+                asdict(ServedBy.from_response(last_attempt)),
+                error_label=_error_label(last_attempt),
+            )
+        return failure
 
     def _filter_proxy_params(self, request_data: dict) -> dict:
         """Filter out proxy-specific parameters from request data"""

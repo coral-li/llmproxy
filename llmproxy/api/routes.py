@@ -1,5 +1,5 @@
 import json
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException, Request, status
 
@@ -10,6 +10,7 @@ from llmproxy.clients.llm_client import LLMClient
 from llmproxy.config_model import DEFAULT_MAX_REQUEST_BODY_BYTES
 from llmproxy.core.cache_manager import CacheManager
 from llmproxy.core.logger import get_logger
+from llmproxy.core.usage_telemetry import UsageRecorder
 from llmproxy.managers.load_balancer import LoadBalancer
 
 logger = get_logger(__name__)
@@ -21,6 +22,7 @@ def create_router(
     llm_client: Optional[Callable[[], LLMClient]] = None,
     config: Optional[Callable[[], Any]] = None,
     response_affinity_manager: Optional[Callable[[], Any]] = None,
+    usage_recorder: Optional[Callable[[], UsageRecorder]] = None,
 ) -> APIRouter:
     """Create FastAPI router with all LLM proxy endpoints"""
 
@@ -34,7 +36,7 @@ def create_router(
         nonlocal chat_handler
         if chat_handler is None:
             chat_handler = _create_chat_handler(
-                get_load_balancer, cache_manager, llm_client, config
+                get_load_balancer, cache_manager, llm_client, config, usage_recorder
             )
         return chat_handler
 
@@ -47,6 +49,7 @@ def create_router(
                 llm_client,
                 config,
                 response_affinity_manager,
+                usage_recorder,
             )
         return response_handler
 
@@ -54,7 +57,7 @@ def create_router(
         nonlocal embedding_handler
         if embedding_handler is None:
             embedding_handler = _create_embedding_handler(
-                get_load_balancer, cache_manager, llm_client, config
+                get_load_balancer, cache_manager, llm_client, config, usage_recorder
             )
         return embedding_handler
 
@@ -84,6 +87,7 @@ def _create_chat_handler(
     cache_manager: Optional[Callable[[], CacheManager]],
     llm_client: Optional[Callable[[], LLMClient]],
     config: Optional[Callable[[], Any]],
+    usage_recorder: Optional[Callable[[], UsageRecorder]] = None,
 ) -> ChatCompletionHandler:
     lb = get_load_balancer()
     if not lb:
@@ -108,6 +112,7 @@ def _create_chat_handler(
         cache_manager=cm,
         llm_client=lc,
         config=cfg,
+        usage_recorder=usage_recorder() if usage_recorder is not None else None,
     )
 
 
@@ -117,6 +122,7 @@ def _create_response_handler(
     llm_client: Optional[Callable[[], LLMClient]],
     config: Optional[Callable[[], Any]],
     response_affinity_manager: Optional[Callable[[], Any]],
+    usage_recorder: Optional[Callable[[], UsageRecorder]] = None,
 ) -> ResponseHandler:
     lb = get_load_balancer()
     if not lb:
@@ -143,6 +149,7 @@ def _create_response_handler(
         llm_client=lc,
         config=cfg,
         response_affinity_manager=ram,
+        usage_recorder=usage_recorder() if usage_recorder is not None else None,
     )
 
 
@@ -151,6 +158,7 @@ def _create_embedding_handler(
     cache_manager: Optional[Callable[[], CacheManager]],
     llm_client: Optional[Callable[[], LLMClient]],
     config: Optional[Callable[[], Any]],
+    usage_recorder: Optional[Callable[[], UsageRecorder]] = None,
 ) -> EmbeddingHandler:
     lb = get_load_balancer()
     if not lb:
@@ -175,31 +183,38 @@ def _create_embedding_handler(
         cache_manager=cm,
         llm_client=lc,
         config=cfg,
+        usage_recorder=usage_recorder() if usage_recorder is not None else None,
     )
 
 
 async def _process_chat_request(
-    handler: ChatCompletionHandler, request_data: dict
+    handler: ChatCompletionHandler,
+    request_data: dict,
+    request_headers: Mapping[str, str],
 ) -> Any:
-    return await handler.handle_request(request_data)
+    return await handler.handle_request(request_data, request_headers)
 
 
 async def _process_response_request(
-    handler: ResponseHandler, request_data: dict
+    handler: ResponseHandler,
+    request_data: dict,
+    request_headers: Mapping[str, str],
 ) -> Any:
-    return await handler.handle_request(request_data)
+    return await handler.handle_request(request_data, request_headers)
 
 
 async def _process_embedding_request(
-    handler: EmbeddingHandler, request_data: dict
+    handler: EmbeddingHandler,
+    request_data: dict,
+    request_headers: Mapping[str, str],
 ) -> Any:
-    return await handler.handle_request(request_data)
+    return await handler.handle_request(request_data, request_headers)
 
 
 async def _handle_endpoint(
     request: Request,
     get_handler: Callable[[], Any],
-    process_func: Callable[[Any, dict], Awaitable[Any]],
+    process_func: Callable[[Any, dict, Mapping[str, str]], Awaitable[Any]],
     config_provider: Optional[Callable[[], Any]] = None,
 ) -> Any:
     try:
@@ -208,7 +223,7 @@ async def _handle_endpoint(
             max_body_bytes=_get_max_request_body_bytes(config_provider),
         )
         handler = get_handler()
-        return await process_func(handler, request_data)
+        return await process_func(handler, request_data, request.headers)
     except HTTPException:
         raise
     except Exception as e:

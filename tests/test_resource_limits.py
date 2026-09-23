@@ -121,7 +121,7 @@ async def test_handle_endpoint_allows_under_limit_json_to_reach_handler():
     request = build_request([b'{"model": "gpt-4"}'])
     observed_request_data = None
 
-    async def process_func(handler, request_data):
+    async def process_func(handler, request_data, request_headers):
         nonlocal observed_request_data
         observed_request_data = request_data
         return {"ok": True}
@@ -142,7 +142,7 @@ async def test_handle_endpoint_rejects_invalid_json_before_handler():
     request = build_request([b'{"model":'])
     handler_called = False
 
-    async def process_func(handler, request_data):
+    async def process_func(handler, request_data, request_headers):
         nonlocal handler_called
         handler_called = True
         return {"ok": True}

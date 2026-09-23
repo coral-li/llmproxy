@@ -2,6 +2,8 @@ import asyncio
 import random
 from typing import Any, Awaitable, Callable, Optional, TypeVar
 
+from fastapi import HTTPException
+
 from llmproxy.core.logger import get_logger
 
 # Imports are handled properly through package structure
@@ -114,6 +116,31 @@ class EndpointError(APIError):
     def __init__(self, message: str, endpoint_id: str, status_code: int = 500):
         super().__init__(message, status_code, "endpoint_error")
         self.endpoint_id = endpoint_id
+
+
+#: Statuses with which an upstream refuses the request itself: a malformed
+#: body, a schema it rejects, a payload too large. Every endpoint refuses such
+#: a request the same way. Authentication, permission and not-found errors are
+#: not among them: those mean an endpoint is misconfigured, which is the
+#: proxy's problem rather than the caller's.
+REQUEST_ERROR_STATUSES = frozenset({400, 413, 422})
+
+
+def is_request_error(status_code: int) -> bool:
+    """Whether an upstream refused the request rather than failed to serve it."""
+    return status_code in REQUEST_ERROR_STATUSES
+
+
+class ProxyRefusal(HTTPException):
+    """A request the proxy turns away itself, before calling any upstream.
+
+    `label` is the short code its usage record carries; records never carry
+    text, and `detail` is text.
+    """
+
+    def __init__(self, status_code: int, detail: str, *, label: str) -> None:
+        super().__init__(status_code=status_code, detail=detail)
+        self.label = label
 
 
 def is_retryable_error(status_code: int) -> bool:
