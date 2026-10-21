@@ -215,6 +215,11 @@ installs use the committed `uv.lock` file via `uv sync --locked`; use
 `make upgrade` when you intentionally want to refresh dependency versions under
 that cooldown.
 
+Security minimum versions are recorded in `pyproject.toml`. Certifi temporarily
+bypasses the cooldown to admit the 2026.10.19 fix for GHSA-6q48-6c7w-9gw2.
+Remove its `exclude-newer-package` exception after 2026-10-27, when its October 20
+PyPI upload has passed the normal cooldown.
+
 Useful scripts:
 
 - `clear_cache.sh`: quick helper to hit the `/cache` endpoint locally.

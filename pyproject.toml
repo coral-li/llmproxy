@@ -28,7 +28,7 @@ dependencies = [
     "fastapi",
     "uvicorn[standard]",
     "pydantic",
-    "pydantic-settings",
+    "pydantic-settings>=2.14.2",
     "httpx",
     "openai",
     "requests>=2.33.0",
@@ -72,6 +72,18 @@ lint = [
 
 [tool.uv]
 exclude-newer = "7 days"
+# GHSA-6q48-6c7w-9gw2: remove this exception after 2026-10-27, once
+# certifi 2026.10.19 (uploaded October 20) has passed the seven-day cooldown.
+exclude-newer-package = { certifi = false }
+# Security floors for transitive dependencies, including pre-commit's virtualenv.
+constraint-dependencies = [
+    "anyio>=4.14.2",
+    "certifi>=2026.10.19",
+    "idna>=3.15",
+    "starlette>=1.3.1",
+    "urllib3>=2.8.0",
+    "virtualenv>=21.14.7",
+]
 
 [project.scripts]
 llmproxy = "llmproxy.cli:main"
