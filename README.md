@@ -29,7 +29,7 @@ tests/          # Pytest suite with mock upstream servers
 
 - Python 3.12 or newer
 - Redis 6+
-- uv
+- uv >= 0.13.4 (includes the certificate fix for GHSA-hq85-5cpj-mr62)
 - API keys for your upstream providers (OpenAI, Azure OpenAI, etc.)
 
 ### 1. Clone and install

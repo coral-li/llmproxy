@@ -71,6 +71,8 @@ lint = [
 ]
 
 [tool.uv]
+# GHSA-hq85-5cpj-mr62: require the fix for uv's bundled CA certificates.
+required-version = ">=0.13.4"
 exclude-newer = "7 days"
 # GHSA-6q48-6c7w-9gw2: remove this exception after 2026-10-27, once
 # certifi 2026.10.19 (uploaded October 20) has passed the seven-day cooldown.
