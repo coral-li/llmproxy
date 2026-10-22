@@ -215,10 +215,18 @@ installs use the committed `uv.lock` file via `uv sync --locked`; use
 `make upgrade` when you intentionally want to refresh dependency versions under
 that cooldown.
 
-Security minimum versions are recorded in `pyproject.toml`. Certifi temporarily
-bypasses the cooldown to admit the 2026.10.19 fix for GHSA-6q48-6c7w-9gw2.
-Remove its `exclude-newer-package` exception after 2026-10-27, when its October 20
-PyPI upload has passed the normal cooldown.
+Security minimum versions are recorded in `pyproject.toml`. Certifi 2026.10.19
+and virtualenv 21.14.12 temporarily bypass the cooldown for the emSign CA-trust
+fixes. Virtualenv bundles pip 26.2.2 for the supported Python versions, including
+pre-commit environments. Remove the certifi exception after 2026-10-27 and the
+virtualenv exception after 2026-10-28, once their PyPI uploads have passed the
+normal cooldown. CI also uses patched uv to install pip 26.2.2 into its base
+Python environment.
+
+Existing pre-commit environments retain their installed pip. After upgrading,
+rebuild them with `uv run --locked --extra dev pre-commit clean` followed by
+`make pre-commit`. The clean command clears the current pre-commit cache, which
+may be shared with other repositories; their hooks will rebuild on next use.
 
 Useful scripts:
 

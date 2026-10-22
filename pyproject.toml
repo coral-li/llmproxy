@@ -74,9 +74,9 @@ lint = [
 # GHSA-hq85-5cpj-mr62: require the fix for uv's bundled CA certificates.
 required-version = ">=0.13.4"
 exclude-newer = "7 days"
-# GHSA-6q48-6c7w-9gw2: remove this exception after 2026-10-27, once
-# certifi 2026.10.19 (uploaded October 20) has passed the seven-day cooldown.
-exclude-newer-package = { certifi = false }
+# emSign CA fixes: certifi 2026.10.19 and virtualenv 21.14.12 (pip 26.2.2).
+# Remove these cooldown exceptions after October 27 and October 28, respectively.
+exclude-newer-package = { certifi = false, virtualenv = false }
 # Security floors for transitive dependencies, including pre-commit's virtualenv.
 constraint-dependencies = [
     "anyio>=4.14.2",
@@ -84,7 +84,7 @@ constraint-dependencies = [
     "idna>=3.15",
     "starlette>=1.3.1",
     "urllib3>=2.8.0",
-    "virtualenv>=21.14.7",
+    "virtualenv>=21.14.12",
 ]
 
 [project.scripts]

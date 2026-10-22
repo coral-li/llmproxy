@@ -37,6 +37,11 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
+      - name: Update pip certificate bundle
+        # Use patched uv to replace pip without invoking its old certificate bundle.
+        # Remove the pip cooldown exception after October 27, 2026.
+        run: uv pip install --system "pip==26.2.2" --exclude-newer-package pip=false
+
       - name: Install dependencies
         run: |
           uv sync --locked --extra dev
