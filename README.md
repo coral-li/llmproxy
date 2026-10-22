@@ -29,7 +29,7 @@ tests/          # Pytest suite with mock upstream servers
 
 - Python 3.12 or newer
 - Redis 6+
-- uv
+- uv >= 0.13.4 (includes the certificate fix for GHSA-hq85-5cpj-mr62)
 - API keys for your upstream providers (OpenAI, Azure OpenAI, etc.)
 
 ### 1. Clone and install
@@ -214,6 +214,19 @@ Dependency resolution uses uv with a 7-day `exclude-newer` cooldown. Routine
 installs use the committed `uv.lock` file via `uv sync --locked`; use
 `make upgrade` when you intentionally want to refresh dependency versions under
 that cooldown.
+
+Security minimum versions are recorded in `pyproject.toml`. Certifi 2026.10.19
+and virtualenv 21.14.12 temporarily bypass the cooldown for the emSign CA-trust
+fixes. Virtualenv bundles pip 26.2.2 for the supported Python versions, including
+pre-commit environments. Remove the certifi exception after 2026-10-27 and the
+virtualenv exception after 2026-10-28, once their PyPI uploads have passed the
+normal cooldown. CI also uses patched uv to install pip 26.2.2 into its base
+Python environment.
+
+Existing pre-commit environments retain their installed pip. After upgrading,
+rebuild them with `uv run --locked --extra dev pre-commit clean` followed by
+`make pre-commit`. The clean command clears the current pre-commit cache, which
+may be shared with other repositories; their hooks will rebuild on next use.
 
 Useful scripts:
 
