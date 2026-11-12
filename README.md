@@ -229,11 +229,12 @@ rebuild them with `uv run --locked --extra dev pre-commit clean` followed by
 may be shared with other repositories; their hooks will rebuild on next use.
 
 GitHub Actions workflows reference exact action tags, and
-`.github/workflows/actions.lock` records the commit each tag resolved to. After
-changing any `uses:` line, run `gh extension install github/gh-actions-lock --pin
-v0.4.1` once, then `gh actions-lock`, and commit the workflow and the lockfile
-together. Never edit the lockfile by hand. CI's Workflow Security job verifies
-the lockfile and audits the workflows with zizmor.
+`.github/workflows/actions.lock` records the commit each tag resolved to.
+After adding, renaming or removing a workflow, or changing any `uses:` line,
+run `gh extension install github/gh-actions-lock --pin v0.4.1` once, then
+`gh actions-lock`, and commit the workflow and the lockfile together. Never
+edit the lockfile by hand. CI's Workflow Security job verifies the
+lockfile and audits the workflows with zizmor.
 
 Useful scripts:
 
