@@ -7,9 +7,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions: {}
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     services:
       redis:
@@ -23,15 +27,17 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.12"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           version: "0.13.4"
           enable-cache: true
@@ -65,3 +71,35 @@ jobs:
         env:
           REDIS_HOST: localhost
           REDIS_PORT: 6379
+
+  workflow_security:
+    name: Workflow Security
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      # Fails when .github/workflows/actions.lock is out of sync with the
+      # workflows, or a locked commit no longer verifies upstream.
+      - name: Verify the actions lockfile
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh extension install github/gh-actions-lock --pin v0.4.1
+          gh actions-lock --verify
+
+      - name: Audit workflows with zizmor
+        if: ${{ !cancelled() }}
+        uses: zizmorcore/zizmor-action@v0.8.1
+        # No `version:`: zizmor follows the release this locked action ships
+        # (1.32.0 for v0.8.1), so bumping the action updates it.
+        with:
+          advanced-security: false
+          annotations: true
+          # Low and informational findings are advisory.
+          min-severity: medium
